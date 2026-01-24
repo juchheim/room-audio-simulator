@@ -1,0 +1,242 @@
+---
+name: room-audio-sim-v1
+description: Enforced implementation rules for Room Audio Simulator v1 (two-channel sweet spot bass sim). Applies to Cursor AI, Codex, and Google Antigravity.
+version: 1.0
+---
+
+# Room Audio Simulator v1 — HARD RULES (Source of Truth)
+
+These rules are authoritative. Do not deviate. If a request conflicts with these rules, follow these rules and explain the conflict briefly in a comment or note. Do not add features that are not explicitly allowed here.
+
+## 0) Planning Docs Are Canon
+All implementation must conform to the planning docs in `/docs/planning/`:
+
+- `/docs/planning/PRD.md`
+- `/docs/planning/simulation_assumptions_v1.md`
+- `/docs/planning/ux_flows_v1.md`
+- `/docs/planning/data_model_v1.md`
+- `/docs/planning/presets_and_tiers_v1.md`
+- `/docs/planning/edge_cases_and_gotchas_v1.md`
+- `/docs/planning/test_plan_v1.md`
+- `/docs/planning/README.md`
+
+If any code change would violate those docs, do not implement it.
+
+---
+
+## 1) v1 Scope (Non-Negotiable)
+
+### Mode
+- v1 is **two-channel sweet spot** only (single listening position).
+- v1 frequency band is **20–120 Hz** only.
+
+### Room Geometry
+- v1 room is **rectangular** only.
+- v1 supports **exactly ONE opening element** on a wall.
+  - Opening types: `doorway`, `hallway`, `open_plan`
+  - Optional door state: `open/closed`
+- No multiple openings. No irregular walls. No L-shaped rooms.
+
+### Subwoofer
+- v1 supports **exactly ONE subwoofer**.
+- Sub modes: **sealed** and **ported** must both be supported.
+- Ported mode must treat **driver and port as separate outputs near tuning (Fb)**.
+- Must support **driver direction** and **port direction**.
+
+### Main Speakers (Mains)
+- Mains are optional but recommended.
+- Mains are **simplified bass contributors** only.
+- Only one control for mains bass: **“mains lowest strong bass (Hz)”**.
+- Do not implement detailed crossover/phase alignment in v1.
+- Always treat **80–120 Hz as “integration-sensitive”**.
+
+### Acoustic Treatments
+- Treatments are **interactive objects** with **snap-to-zone** placement.
+- Strength tiers are simplified and locked: `light`, `medium`, `heavy`.
+- Caps are locked and must be enforced:
+  - Corner traps: max **4**
+  - Rear wall absorber: max **1**
+  - Thick panels: max **6**
+  - Tuned traps: max **2**
+- Diminishing returns are locked:
+  - Primary model: **zone-based diminishing returns**
+  - Tuned traps: hybrid diminishing returns:
+    - same zone + overlapping target band -> strong DR
+    - same zone + different target band -> small DR
+    - different zones -> minimal DR
+- Tuned trap overlap detection is locked (simple ±X rule):
+  - within ±5 Hz => heavy overlap
+  - within ±10 Hz => some overlap
+  - > ±10 Hz => no overlap
+- Treatment UI must express diminishing returns using:
+  - Impact Preview card (Expected benefit + Why)
+  - Zone saturation meter (Low/Med/High)
+  - Frequency overlap meter (None/Some/Heavy)
+  - Snap-zone icons (Best/OK/Limited) for the selected frequency/region
+  - “You’re doubling up” tooltip ONLY when same zone + overlapping targets
+
+### Top Problems (Bass Issues)
+- Must show exactly **3** “Top Problems” in the main list.
+- Problems are **small regions**, NOT single Hz points.
+- Prioritize “most audible” by default:
+  - highest: **30–80 Hz**
+  - medium: **80–120 Hz** (tag integration-sensitive)
+  - lower: **20–30 Hz**
+- Must include **Deep Bass Watchlist** callout if 20–30 Hz is extreme.
+
+### Recommendations (Fix This)
+- For a selected problem, show exactly **3** recommended actions, ranked.
+- Recommendation order priority (two-channel v1):
+  1) Move sub
+  2) Seat micro-move
+  3) Add treatment
+  4) Change sub mode/preset
+  5) Mention multi-sub as future only when plateauing (do not implement multi-sub)
+- Null honesty rule: severe nulls are cancellations; do not present treatment as primary fix.
+- Recommendation fallback rule (locked):
+  - Evaluate candidates against Meaningful Improvement thresholds.
+  - If fewer than 3 meaningful actions exist, fill remaining slots with best-available below-threshold actions labeled “Impact: Low” and the why line from ui_copy_v1.md.
+  - If zero meaningful actions exist, show the banner:
+    - Title: “No meaningful improvements found”
+    - Subtext: “Within current constraints, predicted gains are small. Try the options below.”
+  - In the zero-meaningful case, show 3 informational recommendations in this order:
+    1) Close the door (test) if doorway is open; else unlock seat; else allow nearfield; else alternate preset.
+    2) Validate with a quick sub-crawl or measurement sweep.
+    3) Consider second sub or DSP/EQ (Future).
+  - Use the exact fallback recommendation lines from ui_copy_v1.md.
+
+### Ghost Suggestions
+- Must generate **2–3 ghost sub placements** for Fix This using the locked candidate pool:
+  - perimeter fractional points: 1/6, 1/3, 1/2, 2/3, 5/6
+  - corners
+  - quarter points: (1/4,1/4), (3/4,1/4), (1/4,3/4), (3/4,3/4)
+  - wall midpoints
+  - optional nearfield candidate (~1–2 ft from seat, slightly off-center) only if practical AND allowNearfieldSuggestions is true
+- Nearfield practical definition: 1–2 ft (0.3–0.6 m) from seat, avoids opening keep-out, avoids direct path between mains and seat.
+  - Direct path keep-out: capsule corridor from midpoint(mains L/R) to seat with 0.60 m radius.
+  - Additional keep-out: rectangle in front of mains midpoint, 0.50 m toward seat by 1.20 m wide.
+- Must enforce constraints:
+  - do not block opening segment
+  - enforce port/driver clearance
+  - optional furniture keep-out if couch exists
+- Must ensure diversity between the 2–3 suggestions (not clustered).
+- Must include a one-line rationale per suggestion.
+
+### Seat Micro-Moves
+- Seat micro-move suggestions appear ONLY for seat-sensitive nulls.
+- Candidate moves: 6", 12", 18" in forward/back/left/right.
+- Choose smallest move that gives meaningful improvement.
+- Show 1–2 seat ghost markers (Try 1 / Try 2).
+- If seatLocked is true, suppress seat micro-moves and seat-move recommendations; show the seat-locked note in Fix This.
+
+### Meaningful Improvement Thresholds (Locked)
+- Primary: selected region improves by at least one severity tier.
+- Fallback: RegionDeviationDelta >= 2.0 AND SmoothnessDelta >= +3.0.
+- Seat micro-moves require the primary or fallback plus 2 of 3 improvements:
+  - RegionDeviationDelta >= 2.0
+  - SmoothnessDelta >= +3.0
+  - Top Problems rank improves (moves up or drops out)
+- Ghost sub placements are eligible only if:
+  - severity tier improves, or
+  - RegionDeviationDelta >= 2.5 AND SmoothnessDelta >= +4.0
+
+### User Constraints (Required Fields)
+- seatLocked: boolean toggle that suppresses seat moves and seat-move recommendations.
+- allowNearfieldSuggestions: boolean toggle that gates nearfield ghost candidates.
+
+### A/B Comparison
+- Exactly **two** snapshots: A and B.
+- Must support:
+  - Save A / Save B
+  - Lock A
+  - Revert to A
+  - Compare view with:
+    - Smoothness/Tightness/Confidence deltas
+    - Top Problems mapping (Resolved/New)
+    - curve compare over 20–120 with problem regions highlighted
+    - simple tightness/decay compare (banded)
+    - change log (diff summary)
+
+---
+
+## 2) Language & Trust Rules (Non-Negotiable)
+
+### Confidence-aware phrasing ladder
+- High confidence: “Best next move… likely… expect noticeable…”
+- Medium confidence: “Most likely… try… typically…”
+- Low confidence: “Directional guidance… worth testing… if/then…”
+
+### Null vs Peak truthfulness
+- Nulls are cancellations. Do not claim that treatments “fill” severe nulls.
+- Peaks are more treatment-responsive (esp. ringing/decay).
+
+### Integration-sensitive band
+- Any problem in 80–120 Hz must carry “integration-sensitive” caution and softened phrasing.
+
+Never use absolute certainty (“this will fix it completely”).
+
+---
+
+## 3) Defaults (Locked)
+
+- Default mode: two-channel sweet spot
+- Band: 20–120 Hz
+- Top Problems: 3
+- Seed room if blank: ~12×16×8 ft
+- Default seat placement: centered, ~38% of room length from front wall
+- Opening default: off; when added default type `doorway`, ~3 ft, door closed
+- Default mains: arranged into reasonable triangle; lowest strong bass default ~55–60 Hz
+- Default sub:
+  - position: front wall at ~1/4 room width from left (clearance respected)
+  - default mode: sealed
+  - sealed lowest strong bass default: ~28–30 Hz
+  - preset default: Balanced
+- Default treatments: none
+- Default tuned trap target: dominant peak region center
+- Default seatLocked: false
+- Default allowNearfieldSuggestions: false
+
+Avoid perfect symmetry defaults.
+
+---
+
+## 4) Prohibited Features (v1 MUST NOT)
+
+- Multi-sub simulation
+- Multiple openings
+- Non-rectangular rooms
+- Couch/listening-area averaging (multi-seat)
+- Detailed crossover/phase/time alignment modeling
+- Changing Top Problems from 3
+- Removing treatment caps or diminishing returns
+- Overconfident phrasing or claiming exact dB accuracy
+
+---
+
+## 5) Implementation Guidance (How to Work)
+
+### Build in phases as defined in `/docs/planning/README.md`
+Follow the build order phases. Do not skip ahead with scope creep.
+
+### When uncertain
+- Prefer the simplest interpretation consistent with the planning docs.
+- Add TODO notes instead of inventing new features.
+- If a needed decision is missing, do not guess. Add a note to update planning docs first.
+
+### Outputs must be stable
+- Use region-based logic (not single Hz bins).
+- Use hysteresis for severity to prevent jitter during dragging.
+
+---
+
+## 6) Acceptance Criteria (Quick)
+A change is acceptable only if:
+- It does not violate any hard rule above.
+- Top Problems remains exactly 3.
+- Recommendations remain exactly 3 actions.
+- Problems remain small regions.
+- Sealed + ported modes both work, with port/driver split near Fb.
+- Treatments snap, have caps, and show diminishing returns UI.
+- A/B snapshots work exactly as defined.
+
+End of rules.
