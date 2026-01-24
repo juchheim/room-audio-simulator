@@ -106,9 +106,11 @@ body {
     opacity: 0.35;
     transform: scale(0.4);
   }
+
   70% {
     opacity: 0.15;
   }
+
   100% {
     opacity: 0;
     transform: scale(1.7);
@@ -648,6 +650,40 @@ body {
 
 .compare-log li {
   margin-bottom: 4px;
+}
+
+.room-input-label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  flex: 1;
+  font-size: 11px;
+  color: #4f473c;
+}
+
+.room-input {
+  width: 100%;
+  padding: 6px 8px;
+  border-radius: 6px;
+  border: 1px solid #d8cdbb;
+  background: #fff;
+  font-size: 13px;
+  color: #3f372e;
+}
+
+.room-input:focus {
+  outline: none;
+  border-color: #c06a3a;
+  box-shadow: 0 0 0 2px rgba(192, 106, 58, 0.15);
+}
+
+.panel-toggle select {
+  font-size: 12px;
+  padding: 4px 8px;
+  border-radius: 6px;
+  border: 1px solid #d8cdbb;
+  background: #fff;
+  color: #3f372e;
 }
 
 @media (max-width: 900px) {

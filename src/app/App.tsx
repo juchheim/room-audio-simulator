@@ -2,10 +2,12 @@ import React from "react";
 import { RoomCanvas } from "./RoomCanvas";
 import type {
   Mains,
+  Room,
   Seat,
   Subwoofer,
   Treatment,
   ProjectConstraints,
+  Units,
 } from "../domain/projectState";
 import { createDefaultProjectState } from "../domain/projectState";
 import { buildPlanMarkdown, buildProjectJson } from "../domain/export";
@@ -109,6 +111,35 @@ const CURVE_VIEWBOX_WIDTH = 240;
 const CURVE_VIEWBOX_HEIGHT = 120;
 const SCORE_BANDS = ["Poor", "Fair", "Good", "Excellent"] as const;
 const DEFAULT_EXPORT_NAME = "room-audio-simulator";
+
+const FEET_TO_METERS = 0.3048;
+const METERS_TO_FEET = 1 / FEET_TO_METERS;
+
+function metersToFeet(meters: number): number {
+  return meters * METERS_TO_FEET;
+}
+
+function feetToMeters(feet: number): number {
+  return feet * FEET_TO_METERS;
+}
+
+function displayValue(meters: number, units: Units): string {
+  if (units === "imperial") {
+    return metersToFeet(meters).toFixed(1);
+  }
+  return meters.toFixed(2);
+}
+
+function parseInputToMeters(value: string, units: Units): number {
+  const parsed = Number.parseFloat(value);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return 0;
+  }
+  if (units === "imperial") {
+    return feetToMeters(parsed);
+  }
+  return parsed;
+}
 
 function formatSignedNumber(value: number, decimals = 0): string {
   const rounded = Number(value.toFixed(decimals));
@@ -214,6 +245,26 @@ export function App(): React.ReactElement {
     setState((prev) => ({
       ...prev,
       subwoofer,
+      updatedAt: new Date().toISOString(),
+    }));
+  }, []);
+
+  const updateRoom = React.useCallback(
+    (updates: Partial<Room>) => {
+      previousAnalysisRef.current = null;
+      setState((prev) => ({
+        ...prev,
+        room: { ...prev.room, ...updates },
+        updatedAt: new Date().toISOString(),
+      }));
+    },
+    [],
+  );
+
+  const updateUnits = React.useCallback((units: Units) => {
+    setState((prev) => ({
+      ...prev,
+      units,
       updatedAt: new Date().toISOString(),
     }));
   }, []);
@@ -696,6 +747,78 @@ export function App(): React.ReactElement {
             <div className="panel-row">
               <span>Confidence</span>
               <span>{analysis.confidenceLevel}</span>
+            </div>
+          </section>
+          <section className="panel-card">
+            <h3 className="panel-title">Room Setup</h3>
+            <label className="panel-row panel-toggle">
+              <span>Units</span>
+              <select
+                value={state.units}
+                onChange={(event) =>
+                  updateUnits(event.target.value as Units)
+                }
+              >
+                <option value="imperial">Imperial (ft)</option>
+                <option value="metric">Metric (m)</option>
+              </select>
+            </label>
+            <div className="panel-row">
+              <label className="room-input-label">
+                <span>Length ({state.units === "imperial" ? "ft" : "m"})</span>
+                <input
+                  type="number"
+                  min={state.units === "imperial" ? 6 : 2}
+                  max={state.units === "imperial" ? 100 : 30}
+                  step={state.units === "imperial" ? 0.5 : 0.1}
+                  value={displayValue(state.room.length, state.units)}
+                  onChange={(event) => {
+                    const meters = parseInputToMeters(event.target.value, state.units);
+                    if (meters > 0) {
+                      updateRoom({ length: meters });
+                    }
+                  }}
+                  className="room-input"
+                />
+              </label>
+            </div>
+            <div className="panel-row">
+              <label className="room-input-label">
+                <span>Width ({state.units === "imperial" ? "ft" : "m"})</span>
+                <input
+                  type="number"
+                  min={state.units === "imperial" ? 6 : 2}
+                  max={state.units === "imperial" ? 100 : 30}
+                  step={state.units === "imperial" ? 0.5 : 0.1}
+                  value={displayValue(state.room.width, state.units)}
+                  onChange={(event) => {
+                    const meters = parseInputToMeters(event.target.value, state.units);
+                    if (meters > 0) {
+                      updateRoom({ width: meters });
+                    }
+                  }}
+                  className="room-input"
+                />
+              </label>
+            </div>
+            <div className="panel-row">
+              <label className="room-input-label">
+                <span>Height ({state.units === "imperial" ? "ft" : "m"})</span>
+                <input
+                  type="number"
+                  min={state.units === "imperial" ? 6 : 2}
+                  max={state.units === "imperial" ? 20 : 6}
+                  step={state.units === "imperial" ? 0.5 : 0.1}
+                  value={displayValue(state.room.height, state.units)}
+                  onChange={(event) => {
+                    const meters = parseInputToMeters(event.target.value, state.units);
+                    if (meters > 0) {
+                      updateRoom({ height: meters });
+                    }
+                  }}
+                  className="room-input"
+                />
+              </label>
             </div>
           </section>
           <section className="panel-card">
