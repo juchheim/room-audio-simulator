@@ -1,10 +1,8 @@
-import type {
-  Opening,
-  ProjectState,
-  Room,
-  Treatment,
-  Units,
+import {
+  getCatalogSubModelById,
+  type CatalogSubModelProfile,
 } from "../projectState";
+import type { Opening, ProjectState, Room, Treatment, Units } from "../projectState";
 import { generateSnapZones, type SnapZone } from "../snapZones";
 import {
   getEligibleZones,
@@ -43,6 +41,13 @@ export type HeatmapGrid = {
 export type ResponseCurvePoint = {
   frequency: number;
   response: number;
+  confidenceBounds?: {
+    lower: number;
+    upper: number;
+    plusMinusDb: number;
+    confidence: "low" | "medium" | "high";
+  };
+  shapeSourceLabel?: string;
 };
 
 export type PlacementSource =
@@ -433,6 +438,114 @@ function applyDirectionalResponseAdjustment(
   return clamp01(response * combinedFactor);
 }
 
+function getCatalogProfileForState(
+  state: ProjectState,
+): CatalogSubModelProfile | null {
+  const subModel = state.subwoofer.subModel;
+  if (!subModel || subModel.source !== "catalog") {
+    return null;
+  }
+  return getCatalogSubModelById(subModel.catalogId) ?? null;
+}
+
+function getResponseShapeDeltaDb(
+  profile: CatalogSubModelProfile,
+  frequencyHz: number,
+): number | null {
+  const responseShape = profile.responseShape;
+  if (!responseShape || responseShape.anchors.length === 0) {
+    return null;
+  }
+
+  const anchors = responseShape.anchors;
+  if (frequencyHz <= anchors[0].frequencyHz) {
+    return anchors[0].deltaDb;
+  }
+  if (frequencyHz >= anchors[anchors.length - 1].frequencyHz) {
+    return anchors[anchors.length - 1].deltaDb;
+  }
+
+  for (let i = 0; i < anchors.length - 1; i += 1) {
+    const left = anchors[i];
+    const right = anchors[i + 1];
+    if (frequencyHz < left.frequencyHz || frequencyHz > right.frequencyHz) {
+      continue;
+    }
+    const span = right.frequencyHz - left.frequencyHz;
+    if (span <= 1e-6) {
+      return left.deltaDb;
+    }
+    const ratio = (frequencyHz - left.frequencyHz) / span;
+    return left.deltaDb + (right.deltaDb - left.deltaDb) * ratio;
+  }
+
+  return anchors[anchors.length - 1].deltaDb;
+}
+
+function getResponseShapeBoundsDb(
+  profile: CatalogSubModelProfile,
+  frequencyHz: number,
+): number | null {
+  const responseShape = profile.responseShape;
+  if (!responseShape || responseShape.bounds.length === 0) {
+    return null;
+  }
+
+  for (const band of responseShape.bounds) {
+    if (frequencyHz >= band.lowHz && frequencyHz <= band.highHz) {
+      return band.plusMinusDb;
+    }
+  }
+
+  return null;
+}
+
+function applyMeasurementBackedResponseShaping(
+  state: ProjectState,
+  frequencyHz: number,
+  response: number,
+): {
+  response: number;
+  confidenceBounds?: {
+    lower: number;
+    upper: number;
+    plusMinusDb: number;
+    confidence: "low" | "medium" | "high";
+  };
+  shapeSourceLabel?: string;
+} {
+  const profile = getCatalogProfileForState(state);
+  if (!profile) {
+    return { response };
+  }
+
+  const deltaDb = getResponseShapeDeltaDb(profile, frequencyHz);
+  if (deltaDb === null) {
+    return { response };
+  }
+
+  const shapedResponse = clamp01(response + deltaDb / DEVIATION_SCALE);
+  const plusMinusDb = getResponseShapeBoundsDb(profile, frequencyHz);
+  if (plusMinusDb === null) {
+    return {
+      response: shapedResponse,
+      shapeSourceLabel: profile.responseShape?.sourceLabel,
+    };
+  }
+
+  const boundDelta = plusMinusDb / DEVIATION_SCALE;
+  return {
+    response: shapedResponse,
+    confidenceBounds: {
+      lower: clamp01(shapedResponse - boundDelta),
+      upper: clamp01(shapedResponse + boundDelta),
+      plusMinusDb,
+      confidence: profile.confidence,
+    },
+    shapeSourceLabel: profile.responseShape?.sourceLabel,
+  };
+}
+
 function computeAxisResponseAtPoint(
   seed: ModeSeed,
   state: ProjectState,
@@ -539,8 +652,13 @@ export function computeHeatmapGrid(
           frequency,
           baseResponse,
         );
+        const shaped = applyMeasurementBackedResponseShaping(
+          state,
+          frequency,
+          directional,
+        );
         const combined =
-          directional * (1 - HEATMAP_SOURCE_WEIGHT) +
+          shaped.response * (1 - HEATMAP_SOURCE_WEIGHT) +
           sourceInfluence * HEATMAP_SOURCE_WEIGHT;
         total += combined;
       }
@@ -610,14 +728,33 @@ export function computeResponseCurve(
       frequency,
       baseResponse,
     );
-    let finalResponse = directional;
+    const shaped = applyMeasurementBackedResponseShaping(
+      state,
+      frequency,
+      directional,
+    );
+    let finalResponse = shaped.response;
+    let confidenceBounds = shaped.confidenceBounds;
 
     if (finalResponse >= 0.5) {
       const reduction = getTreatmentPeakReduction(treatments, frequency, regionWidth);
-      finalResponse = clamp01(finalResponse - reduction / DEVIATION_SCALE);
+      const reductionDelta = reduction / DEVIATION_SCALE;
+      finalResponse = clamp01(finalResponse - reductionDelta);
+      if (confidenceBounds) {
+        confidenceBounds = {
+          ...confidenceBounds,
+          lower: clamp01(confidenceBounds.lower - reductionDelta),
+          upper: clamp01(confidenceBounds.upper - reductionDelta),
+        };
+      }
     }
 
-    points.push({ frequency, response: finalResponse });
+    points.push({
+      frequency,
+      response: finalResponse,
+      ...(confidenceBounds ? { confidenceBounds } : {}),
+      ...(shaped.shapeSourceLabel ? { shapeSourceLabel: shaped.shapeSourceLabel } : {}),
+    });
   }
 
   return points;
@@ -1316,6 +1453,29 @@ function computeConfidenceScore(
     }
   }
 
+  const modelProfile = getCatalogProfileForState(state);
+  if (modelProfile) {
+    if (modelProfile.confidence === "low") {
+      score -= 0.08;
+    } else if (modelProfile.confidence === "medium") {
+      score -= 0.04;
+    } else {
+      score += 0.02;
+    }
+
+    if (modelProfile.responseShape) {
+      // Measurement-backed shaping provides a small confidence lift.
+      score += 0.02;
+    }
+
+    if (modelProfile.missingData && modelProfile.missingData.length > 0) {
+      score -= Math.min(0.12, modelProfile.missingData.length * 0.015);
+    }
+  } else if (state.subwoofer.subModel?.source === "custom") {
+    // Custom models are valid, but typically less constrained by measured data.
+    score -= 0.07;
+  }
+
   return clamp(score, 0, 1);
 }
 
@@ -1469,7 +1629,12 @@ function buildCandidateFromResponse(
     centerHz,
     response,
   );
-  const adjustedResponse = applyLeakageToResponse(directionalResponse, leakage);
+  const shapedResponse = applyMeasurementBackedResponseShaping(
+    state,
+    centerHz,
+    directionalResponse,
+  ).response;
+  const adjustedResponse = applyLeakageToResponse(shapedResponse, leakage);
   const deviation = computeDeviationFromResponse(
     centerHz,
     response,
@@ -1925,7 +2090,12 @@ function computeDeviationFromResponse(
     centerHz,
     response,
   );
-  const adjustedResponse = applyLeakageToResponse(directionalResponse, leakage);
+  const shapedResponse = applyMeasurementBackedResponseShaping(
+    state,
+    centerHz,
+    directionalResponse,
+  ).response;
+  const adjustedResponse = applyLeakageToResponse(shapedResponse, leakage);
   const rawDeviation = Math.abs(adjustedResponse - 0.5) * DEVIATION_SCALE;
   const kind: ProblemKind = adjustedResponse >= 0.5 ? "peak" : "null";
   const width = getRegionWidthHz(centerHz);

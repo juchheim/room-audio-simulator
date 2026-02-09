@@ -178,6 +178,7 @@ export function SetupPanel({
                             type="button"
                             className="deck-button-small"
                             onClick={onAddOpening}
+                            aria-label="Add Opening"
                         >
                             Add
                         </button>
@@ -194,6 +195,7 @@ export function SetupPanel({
                                             wall: e.target.value as Opening["wall"],
                                         })
                                     }
+                                    aria-label={`Opening ${index + 1} Wall`}
                                     className="deck-select-tiny"
                                 >
                                     {Object.entries(WALL_LABELS).map(([value, label]) => (
@@ -219,6 +221,7 @@ export function SetupPanel({
                                                 : { doorState: undefined }),
                                         });
                                     }}
+                                    aria-label={`Opening ${index + 1} Type`}
                                     className="deck-select-tiny"
                                 >
                                     {Object.entries(OPENING_TYPE_LABELS).map(([value, label]) => (
@@ -231,6 +234,7 @@ export function SetupPanel({
                                     type="button"
                                     onClick={() => onRemoveOpening(opening.id)}
                                     className="deck-button-icon"
+                                    aria-label={`Remove Opening ${index + 1}`}
                                     title="Remove opening"
                                 >
                                     ×
@@ -251,6 +255,7 @@ export function SetupPanel({
                                                 }
                                                 onUpdateOpening(opening.id, { width: next });
                                             }}
+                                            aria-label={`Opening ${index + 1} Width`}
                                             className="deck-input-tiny"
                                         />
                                     </label>
@@ -267,6 +272,7 @@ export function SetupPanel({
                                                     positionAlongWallNorm: clamp01(parseFloat(e.target.value)),
                                                 })
                                             }
+                                            aria-label={`Opening ${index + 1} Position`}
                                             className="deck-slider"
                                             title="Position along wall"
                                             style={{ width: "100%", marginTop: "6px" }}

@@ -5,10 +5,15 @@ import type {
     Treatment,
 } from "../../domain/projectState";
 import {
+    applyCatalogSubModelToSubwoofer,
+    DEFAULT_CUSTOM_SUB_MANUFACTURER,
+    DEFAULT_CUSTOM_SUB_MODEL,
     DEFAULT_SUB_FB_HZ,
     DEFAULT_SUB_LOWEST_STRONG_BASS_HZ,
+    getDefaultCatalogIdForMode,
     PORTED_SUB_PRESETS,
     SEALED_SUB_PRESETS,
+    SUB_MODEL_CATALOG,
     SUB_DRIVER_DIRECTIONS,
     SUB_PORT_DIRECTIONS,
 } from "../../domain/projectState";
@@ -64,6 +69,28 @@ const DIRECTION_LABELS: Record<
     none: "None",
 };
 
+const CUSTOM_SUB_MODEL_ID = "__custom__";
+
+function formatModelConfidence(confidence: "low" | "medium" | "high"): string {
+    if (confidence === "high") {
+        return "High Confidence";
+    }
+    if (confidence === "medium") {
+        return "Medium Confidence";
+    }
+    return "Low Confidence";
+}
+
+function getMissingDataHeading(confidence: "low" | "medium" | "high"): string {
+    if (confidence === "high") {
+        return "Remaining data gaps (for tighter uncertainty)";
+    }
+    if (confidence === "medium") {
+        return "Missing data for higher confidence";
+    }
+    return "Key missing data";
+}
+
 export function TreatmentsPanel({
     treatments,
     snapZones,
@@ -102,6 +129,28 @@ export function TreatmentsPanel({
         subwoofer.mode === "sealed"
             ? subwoofer.lowestStrongBassHz ?? DEFAULT_SUB_LOWEST_STRONG_BASS_HZ
             : subwoofer.fbHz ?? DEFAULT_SUB_FB_HZ;
+    const selectedSubModelId =
+        subwoofer.subModel?.source === "catalog"
+            ? subwoofer.subModel.catalogId
+            : CUSTOM_SUB_MODEL_ID;
+    const selectedCatalogProfile = React.useMemo(() => {
+        if (selectedSubModelId === CUSTOM_SUB_MODEL_ID) {
+            return null;
+        }
+        return (
+            SUB_MODEL_CATALOG.find(
+                (profile) => profile.catalogId === selectedSubModelId,
+            ) ?? null
+        );
+    }, [selectedSubModelId]);
+    const customSubModel =
+        subwoofer.subModel?.source === "custom"
+            ? subwoofer.subModel
+            : {
+                  source: "custom" as const,
+                  manufacturer: DEFAULT_CUSTOM_SUB_MANUFACTURER,
+                  model: DEFAULT_CUSTOM_SUB_MODEL,
+              };
 
     return (
         <div className="deck-column">
@@ -120,16 +169,163 @@ export function TreatmentsPanel({
                     />
                     Mains Enabled
                 </label>
+                <div className="deck-input-group-vertical">
+                    <label className="deck-label">
+                        Subwoofer Model
+                        <select
+                            value={selectedSubModelId}
+                            onChange={(e) => {
+                                const nextId = e.target.value;
+                                if (nextId === CUSTOM_SUB_MODEL_ID) {
+                                    onUpdateSubwoofer({
+                                        ...subwoofer,
+                                        subModel: customSubModel,
+                                    });
+                                    return;
+                                }
+                                onUpdateSubwoofer(
+                                    applyCatalogSubModelToSubwoofer(subwoofer, nextId),
+                                );
+                            }}
+                            aria-label="Subwoofer Model"
+                            className="deck-select"
+                        >
+                            {SUB_MODEL_CATALOG.map((profile) => (
+                                <option key={profile.catalogId} value={profile.catalogId}>
+                                    {profile.manufacturer} — {profile.model}
+                                </option>
+                            ))}
+                            <option value={CUSTOM_SUB_MODEL_ID}>Custom Model</option>
+                        </select>
+                    </label>
+                    {selectedSubModelId === CUSTOM_SUB_MODEL_ID && (
+                        <div
+                            className="deck-input-group"
+                            style={{ gridTemplateColumns: "1fr 1fr" }}
+                        >
+                            <label className="deck-label">
+                                Manufacturer
+                                <input
+                                    type="text"
+                                    value={customSubModel.manufacturer}
+                                    onChange={(e) =>
+                                        onUpdateSubwoofer({
+                                            ...subwoofer,
+                                            subModel: {
+                                                ...customSubModel,
+                                                manufacturer:
+                                                    e.target.value ||
+                                                    DEFAULT_CUSTOM_SUB_MANUFACTURER,
+                                            },
+                                        })
+                                    }
+                                    aria-label="Custom Subwoofer Manufacturer"
+                                    className="deck-input"
+                                />
+                            </label>
+                            <label className="deck-label">
+                                Model
+                                <input
+                                    type="text"
+                                    value={customSubModel.model}
+                                    onChange={(e) =>
+                                        onUpdateSubwoofer({
+                                            ...subwoofer,
+                                            subModel: {
+                                                ...customSubModel,
+                                                model: e.target.value || DEFAULT_CUSTOM_SUB_MODEL,
+                                            },
+                                        })
+                                    }
+                                    aria-label="Custom Subwoofer Model"
+                                    className="deck-input"
+                                />
+                            </label>
+                        </div>
+                    )}
+                    {selectedCatalogProfile && (
+                        <div className="model-evidence-card">
+                            <div className="model-evidence-header">
+                                <span
+                                    className={`model-confidence-chip ${selectedCatalogProfile.confidence}`}
+                                >
+                                    {formatModelConfidence(selectedCatalogProfile.confidence)}
+                                </span>
+                                <span className="model-evidence-title">
+                                    Catalog profile
+                                </span>
+                            </div>
+                            {selectedCatalogProfile.evidenceSummary && (
+                                <p className="model-evidence-text">
+                                    {selectedCatalogProfile.evidenceSummary}
+                                </p>
+                            )}
+                            {selectedCatalogProfile.responseShape && (
+                                <>
+                                    <p className="model-evidence-text">
+                                        Response shape:{" "}
+                                        {selectedCatalogProfile.responseShape.sourceLabel}
+                                    </p>
+                                    <div className="model-bounds-grid">
+                                        {selectedCatalogProfile.responseShape.bounds.map(
+                                            (band, index) => (
+                                                <div
+                                                    key={`setup-bound-${index}`}
+                                                    className="model-bounds-row"
+                                                >
+                                                    <span className="model-bounds-range">
+                                                        {band.lowHz}-{band.highHz} Hz
+                                                    </span>
+                                                    <span className="model-bounds-delta">
+                                                        ±{band.plusMinusDb.toFixed(1)} dB
+                                                    </span>
+                                                </div>
+                                            ),
+                                        )}
+                                    </div>
+                                </>
+                            )}
+                            {selectedCatalogProfile.missingData &&
+                                selectedCatalogProfile.missingData.length > 0 && (
+                                    <div>
+                                        <div className="model-missing-title">
+                                            {getMissingDataHeading(selectedCatalogProfile.confidence)}
+                                        </div>
+                                        <div className="model-missing-list">
+                                            {selectedCatalogProfile.missingData.map((item) => (
+                                                <span
+                                                    key={item}
+                                                    className="model-missing-item"
+                                                >
+                                                    {item}
+                                                </span>
+                                            ))}
+                                        </div>
+                                    </div>
+                                )}
+                        </div>
+                    )}
+                </div>
                 <div className="deck-row-spaced">
                     <span className="deck-label-text">Subwoofer Mode</span>
                     <select
                         value={subwoofer.mode}
-                        onChange={(e) =>
+                        onChange={(e) => {
+                            const nextMode = e.target.value as "sealed" | "ported";
+                            if (subwoofer.subModel?.source === "catalog") {
+                                onUpdateSubwoofer(
+                                    applyCatalogSubModelToSubwoofer(
+                                        { ...subwoofer, mode: nextMode },
+                                        getDefaultCatalogIdForMode(nextMode),
+                                    ),
+                                );
+                                return;
+                            }
                             onUpdateSubwoofer({
                                 ...subwoofer,
-                                mode: e.target.value as "sealed" | "ported",
-                            })
-                        }
+                                mode: nextMode,
+                            });
+                        }}
                         aria-label="Subwoofer Mode"
                         className="deck-select-tiny"
                     >

@@ -1,6 +1,7 @@
 import { z } from "zod";
 
-export const SCHEMA_VERSION = "v1" as const;
+export const LEGACY_SCHEMA_VERSION = "v1" as const;
+export const SCHEMA_VERSION = "v2" as const;
 
 export const SchemaVersionSchema = z.literal(SCHEMA_VERSION);
 export const UnitsSchema = z.enum(["imperial", "metric"]);
@@ -99,6 +100,27 @@ export const PortDirectionSchema = z.enum([
   "none",
 ]);
 
+export const CatalogSubModelSchema = z
+  .object({
+    source: z.literal("catalog"),
+    catalogId: z.string().min(1),
+    manufacturer: z.string().min(1),
+    model: z.string().min(1),
+    revision: z.string().min(1).optional(),
+  })
+  .strict();
+
+export const CustomSubModelSchema = z
+  .object({
+    source: z.literal("custom"),
+    manufacturer: z.string().min(1),
+    model: z.string().min(1),
+    revision: z.string().min(1).optional(),
+  })
+  .strict();
+
+export const SubModelSchema = z.union([CatalogSubModelSchema, CustomSubModelSchema]);
+
 export const SubwooferSchema = z
   .object({
     x: z.number(),
@@ -109,6 +131,7 @@ export const SubwooferSchema = z
     portDirection: PortDirectionSchema,
     lowestStrongBassHz: z.number().positive().optional(),
     fbHz: z.number().positive().optional(),
+    subModel: SubModelSchema.optional(),
   })
   .strict()
   .superRefine((sub, ctx) => {
@@ -224,5 +247,8 @@ export type Opening = z.infer<typeof OpeningSchema>;
 export type Room = z.infer<typeof RoomSchema>;
 export type Seat = z.infer<typeof SeatSchema>;
 export type Mains = z.infer<typeof MainsSchema>;
+export type CatalogSubModel = z.infer<typeof CatalogSubModelSchema>;
+export type CustomSubModel = z.infer<typeof CustomSubModelSchema>;
 export type Subwoofer = z.infer<typeof SubwooferSchema>;
+export type SubModel = z.infer<typeof SubModelSchema>;
 export type Treatment = z.infer<typeof TreatmentSchema>;

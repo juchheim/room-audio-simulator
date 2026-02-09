@@ -1,6 +1,7 @@
 import type { ProjectState, Room, Opening } from "./schema";
 import { ProjectStateSchema } from "./schema";
 import { migrateProjectState } from "./migrations";
+import { normalizeSubwoofer } from "./subwoofer";
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
@@ -58,6 +59,7 @@ function normalizeProjectState(state: ProjectState): ProjectState {
       ...state.room,
       openings: normalizedOpenings,
     },
+    subwoofer: normalizeSubwoofer(state.subwoofer),
   };
 }
 
@@ -65,7 +67,11 @@ export function deserializeProjectState(input: string | unknown): ProjectState {
   const raw = typeof input === "string" ? JSON.parse(input) : input;
   const migrated = migrateProjectState(raw);
   const parsed = ProjectStateSchema.parse(migrated);
-  return normalizeProjectState(parsed);
+  const normalized = normalizeProjectState(parsed);
+  return {
+    ...normalized,
+    subwoofer: normalizeSubwoofer(normalized.subwoofer),
+  };
 }
 
 export function serializeProjectState(state: ProjectState): string {

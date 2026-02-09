@@ -4,6 +4,7 @@ import { ControlDeck } from "./components/ControlDeck";
 import { SetupPanel } from "./components/SetupPanel";
 import { TreatmentsPanel } from "./components/TreatmentsPanel";
 import { AnalysisPanel } from "./components/AnalysisPanel";
+import { TopProblemsPanel } from "./components/TopProblemsPanel";
 import { SnapshotsPanel } from "./components/SnapshotsPanel";
 import type {
   Mains,
@@ -18,7 +19,7 @@ import type {
 import {
   createDefaultProjectState,
   MAX_OPENINGS,
-  normalizeSubwooferForMode,
+  normalizeSubwoofer,
 } from "../domain/projectState";
 import { buildPlanMarkdown, buildProjectJson } from "../domain/export";
 import type { Snapshot, SnapshotSlot } from "../domain/snapshots";
@@ -280,6 +281,15 @@ export function App(): React.ReactElement {
   const [editingTreatmentId, setEditingTreatmentId] = React.useState<string | null>(
     null,
   );
+  const [uiError, setUiError] = React.useState<string | null>(null);
+
+  const reportUiError = React.useCallback(
+    (message: string, error: unknown) => {
+      console.error(message, error);
+      setUiError(message);
+    },
+    [],
+  );
 
   const addTreatment = React.useCallback(
     (
@@ -356,7 +366,7 @@ export function App(): React.ReactElement {
   const updateSubwoofer = React.useCallback((subwoofer: Subwoofer) => {
     // Clear analysis history whenever sub changes to avoid stale hysteresis artifacts.
     previousAnalysisRef.current = null;
-    const normalized = normalizeSubwooferForMode(subwoofer);
+    const normalized = normalizeSubwoofer(subwoofer);
     setState((prev) => ({
       ...prev,
       subwoofer: normalized,
@@ -554,11 +564,12 @@ export function App(): React.ReactElement {
         const restored = restoreSnapshot(snapshot);
         previousAnalysisRef.current = null;
         setState(restored);
+        setUiError(null);
       } catch (error) {
-        console.error("Failed to restore snapshot:", error);
+        reportUiError(`Could not load snapshot ${slot}.`, error);
       }
     },
-    [snapshots],
+    [reportUiError, snapshots],
   );
 
   const applyGhostSubPlacement = React.useCallback(
@@ -796,10 +807,11 @@ export function App(): React.ReactElement {
       const contents = buildProjectJson(state);
       downloadFile(contents, `${exportBaseName}-project.json`, "application/json");
       setExportMenu(null);
+      setUiError(null);
     } catch (error) {
-      console.error("Failed to export project JSON:", error);
+      reportUiError("Could not export project JSON.", error);
     }
-  }, [exportBaseName, state]);
+  }, [exportBaseName, reportUiError, state]);
 
   const handleExportPlanMarkdown = React.useCallback(() => {
     try {
@@ -809,13 +821,23 @@ export function App(): React.ReactElement {
       });
       downloadFile(contents, `${exportBaseName}-plan.md`, "text/markdown");
       setExportMenu(null);
+      setUiError(null);
     } catch (error) {
-      console.error("Failed to export plan markdown:", error);
+      reportUiError("Could not export plan markdown.", error);
     }
-  }, [analysis, exportBaseName, exportCompareSummary, state]);
+  }, [analysis, exportBaseName, exportCompareSummary, reportUiError, state]);
 
   return (
     <div className="app-container">
+      <div className="app-top-row">
+        <SnapshotsPanel
+          layout="row"
+          snapshots={snapshots}
+          onSaveSnapshot={saveSnapshot}
+          onLoadSnapshot={loadSnapshot}
+          onToggleLockA={toggleLockA}
+        />
+      </div>
       <header className="app-header">
         <div>
           <h1>Room Audio Simulator</h1>
@@ -831,6 +853,19 @@ export function App(): React.ReactElement {
           </button>
         </div>
       </header>
+      {uiError && (
+        <div className="app-error-banner" role="alert">
+          <span>{uiError}</span>
+          <button
+            type="button"
+            className="deck-button secondary app-error-dismiss"
+            onClick={() => setUiError(null)}
+            aria-label="Dismiss error"
+          >
+            Dismiss
+          </button>
+        </div>
+      )}
 
       <div className="stage-area">
         <RoomCanvas
@@ -883,14 +918,12 @@ export function App(): React.ReactElement {
         />
         <AnalysisPanel
           analysis={analysis}
+          subwoofer={state.subwoofer}
+        />
+        <TopProblemsPanel
+          analysis={analysis}
           selectedProblemId={selectedProblemId}
           onSelectProblem={setSelectedProblemId}
-        />
-        <SnapshotsPanel
-          snapshots={snapshots}
-          onSaveSnapshot={saveSnapshot}
-          onLoadSnapshot={loadSnapshot}
-          onToggleLockA={toggleLockA}
         />
       </ControlDeck>
     </div>

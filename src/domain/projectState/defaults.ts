@@ -1,5 +1,6 @@
 import type { ProjectState } from "./schema";
 import { SCHEMA_VERSION } from "./schema";
+import { getDefaultCatalogSubModelForMode, toCatalogSubModel } from "./subModelCatalog";
 
 const FEET_TO_METERS = 0.3048;
 
@@ -87,6 +88,7 @@ export function createDefaultProjectState(
       driverDirection: "rear",
       portDirection: "none",
       lowestStrongBassHz: DEFAULT_SUB_LOWEST_STRONG_BASS_HZ,
+      subModel: toCatalogSubModel(getDefaultCatalogSubModelForMode("sealed")),
     },
     treatments: [],
     createdAt: timestamp,

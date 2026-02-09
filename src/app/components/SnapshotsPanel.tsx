@@ -2,6 +2,7 @@ import React from "react";
 import type { Snapshot, SnapshotSlot } from "../../domain/snapshots";
 
 type SnapshotsPanelProps = {
+    layout?: "column" | "row";
     snapshots: {
         A: Snapshot | null;
         B: Snapshot | null;
@@ -12,12 +13,114 @@ type SnapshotsPanelProps = {
     onToggleLockA: (locked: boolean) => void;
 };
 
+function SnapshotCard({
+    slot,
+    snapshot,
+    lockA,
+    onSaveSnapshot,
+    onLoadSnapshot,
+    onToggleLockA,
+}: {
+    slot: SnapshotSlot;
+    snapshot: Snapshot | null;
+    lockA: boolean;
+    onSaveSnapshot: (slot: SnapshotSlot) => void;
+    onLoadSnapshot: (slot: SnapshotSlot) => void;
+    onToggleLockA: (locked: boolean) => void;
+}): React.ReactElement {
+    const isA = slot === "A";
+
+    return (
+        <div className="snapshot-card">
+            <div className="snapshot-header">
+                <span className="snapshot-label">Snapshot {slot}</span>
+                {isA && (
+                    <label className="snapshot-lock">
+                        <input
+                            type="checkbox"
+                            checked={lockA}
+                            onChange={(e) => onToggleLockA(e.target.checked)}
+                        />
+                        Lock
+                    </label>
+                )}
+            </div>
+            <div className="snapshot-actions">
+                <button
+                    type="button"
+                    className="deck-button"
+                    onClick={() => onSaveSnapshot(slot)}
+                    disabled={isA && lockA}
+                    aria-label={`Save Snapshot ${slot}`}
+                >
+                    {snapshot ? `Update ${slot}` : `Save ${slot}`}
+                </button>
+                <button
+                    type="button"
+                    className="deck-button secondary"
+                    onClick={() => onLoadSnapshot(slot)}
+                    disabled={!snapshot}
+                    aria-label={`Load Snapshot ${slot}`}
+                >
+                    Load
+                </button>
+            </div>
+            {snapshot && (
+                <>
+                    <div className="snapshot-meta">
+                        {new Date(snapshot.savedAt).toLocaleTimeString()}
+                    </div>
+                    {snapshot.changeLog && snapshot.changeLog.length > 0 && (
+                        <ul className="snapshot-log">
+                            {snapshot.changeLog.map((line, index) => (
+                                <li key={`${slot.toLowerCase()}-log-${index}`}>{line}</li>
+                            ))}
+                        </ul>
+                    )}
+                </>
+            )}
+        </div>
+    );
+}
+
 export function SnapshotsPanel({
+    layout = "column",
     snapshots,
     onSaveSnapshot,
     onLoadSnapshot,
     onToggleLockA,
 }: SnapshotsPanelProps): React.ReactElement {
+    if (layout === "row") {
+        return (
+            <div className="snapshots-row-shell">
+                <div className="snapshots-row-header">
+                    <h3 className="deck-title">Snapshots</h3>
+                    <div className="deck-help-text snapshots-help-text">
+                        Save a snapshot to compare changes. Lock 'A' to keep a baseline.
+                    </div>
+                </div>
+                <div className="snapshots-row-grid">
+                    <SnapshotCard
+                        slot="A"
+                        snapshot={snapshots.A}
+                        lockA={snapshots.lockA}
+                        onSaveSnapshot={onSaveSnapshot}
+                        onLoadSnapshot={onLoadSnapshot}
+                        onToggleLockA={onToggleLockA}
+                    />
+                    <SnapshotCard
+                        slot="B"
+                        snapshot={snapshots.B}
+                        lockA={snapshots.lockA}
+                        onSaveSnapshot={onSaveSnapshot}
+                        onLoadSnapshot={onLoadSnapshot}
+                        onToggleLockA={onToggleLockA}
+                    />
+                </div>
+            </div>
+        );
+    }
+
     return (
         <div className="deck-column">
             <div className="deck-header">
@@ -25,72 +128,25 @@ export function SnapshotsPanel({
             </div>
 
             <div className="deck-section">
-                <div className="snapshot-card">
-                    <div className="snapshot-header">
-                        <span className="snapshot-label">Snapshot A</span>
-                        <label className="snapshot-lock">
-                            <input
-                                type="checkbox"
-                                checked={snapshots.lockA}
-                                onChange={(e) => onToggleLockA(e.target.checked)}
-                            />
-                            Lock
-                        </label>
-                    </div>
-                    <div className="snapshot-actions">
-                        <button
-                            type="button"
-                            className="deck-button"
-                            onClick={() => onSaveSnapshot("A")}
-                            disabled={snapshots.lockA}
-                        >
-                            {snapshots.A ? "Update A" : "Save A"}
-                        </button>
-                        <button
-                            type="button"
-                            className="deck-button secondary"
-                            onClick={() => onLoadSnapshot("A")}
-                            disabled={!snapshots.A}
-                        >
-                            Load
-                        </button>
-                    </div>
-                    {snapshots.A && (
-                        <div className="snapshot-meta">
-                            {new Date(snapshots.A.savedAt).toLocaleTimeString()}
-                        </div>
-                    )}
-                </div>
+                <SnapshotCard
+                    slot="A"
+                    snapshot={snapshots.A}
+                    lockA={snapshots.lockA}
+                    onSaveSnapshot={onSaveSnapshot}
+                    onLoadSnapshot={onLoadSnapshot}
+                    onToggleLockA={onToggleLockA}
+                />
             </div>
 
             <div className="deck-section">
-                <div className="snapshot-card">
-                    <div className="snapshot-header">
-                        <span className="snapshot-label">Snapshot B</span>
-                    </div>
-                    <div className="snapshot-actions">
-                        <button
-                            type="button"
-                            className="deck-button"
-                            onClick={() => onSaveSnapshot("B")}
-                        >
-                            {snapshots.B ? "Update B" : "Save B"}
-                        </button>
-                        <button
-                            type="button"
-                            className="deck-button secondary"
-                            onClick={() => onLoadSnapshot("B")}
-                            disabled={!snapshots.B}
-                        >
-                            Load
-                        </button>
-                    </div>
-                    {snapshots.B && (
-                        <div className="snapshot-meta">
-                            {new Date(snapshots.B.savedAt).toLocaleTimeString()}
-                        </div>
-                    )}
-                </div>
+                <SnapshotCard
+                    slot="B"
+                    snapshot={snapshots.B}
+                    lockA={snapshots.lockA}
+                    onSaveSnapshot={onSaveSnapshot}
+                    onLoadSnapshot={onLoadSnapshot}
+                    onToggleLockA={onToggleLockA}
+                />
             </div>
 
             <div className="deck-section flex-grow">

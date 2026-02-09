@@ -1,24 +1,36 @@
 import React from "react";
 import type {
     AnalysisResult,
-    TopProblem,
 } from "../../domain/analysis";
+import type { Subwoofer } from "../../domain/projectState";
+import { getCatalogSubModelById } from "../../domain/projectState";
 
 type AnalysisPanelProps = {
     analysis: AnalysisResult;
-    selectedProblemId: string | null;
-    onSelectProblem: (id: string | null) => void;
+    subwoofer: Subwoofer;
 };
 
-function formatSeverity(severity: string): string {
-    return `${severity[0].toUpperCase()}${severity.slice(1)}`;
+function formatModelConfidence(confidence: "low" | "medium" | "high"): string {
+    if (confidence === "high") {
+        return "High Confidence";
+    }
+    if (confidence === "medium") {
+        return "Medium Confidence";
+    }
+    return "Low Confidence";
 }
 
 export function AnalysisPanel({
     analysis,
-    selectedProblemId,
-    onSelectProblem,
+    subwoofer,
 }: AnalysisPanelProps): React.ReactElement {
+    const modelProfile = React.useMemo(() => {
+        if (subwoofer.subModel?.source !== "catalog") {
+            return null;
+        }
+        return getCatalogSubModelById(subwoofer.subModel.catalogId) ?? null;
+    }, [subwoofer.subModel]);
+
     return (
         <div className="deck-column">
             <div className="deck-header">
@@ -36,53 +48,47 @@ export function AnalysisPanel({
                         <div className="scorecard-label">Tightness</div>
                     </div>
                     <div className="scorecard-item">
-                        <div className="scorecard-value">{analysis.confidenceScore}</div>
+                        <div className="scorecard-value">
+                            {Math.round(analysis.confidenceScore * 100)}%
+                        </div>
+                        <div className="scorecard-meta">{analysis.confidenceLevel}</div>
                         <div className="scorecard-label">Confidence</div>
                     </div>
                 </div>
             </div>
 
-            <div className="deck-section flex-grow">
-                <h4 className="deck-subtitle">Top Problems</h4>
-                <div className="deck-list">
-                    {analysis.topProblems.length === 0 && (
-                        <div className="deck-empty">No severe problems detected.</div>
-                    )}
-                    {analysis.topProblems.map(problem => {
-                        const isSelected = problem.id === selectedProblemId;
-                        const kindLabel = problem.kind === "peak" ? "Peak" : "Null";
-                        const center = Math.round(problem.centerHz);
-
-                        return (
-                            <button
-                                key={problem.id}
-                                type="button"
-                                className={`problem-card ${isSelected ? 'is-selected' : ''}`}
-                                onClick={() => onSelectProblem(isSelected ? null : problem.id)}
+            {modelProfile?.responseShape && (
+                <div className="deck-section">
+                    <h4 className="deck-subtitle">Model Confidence Bounds</h4>
+                    <div className="model-evidence-card">
+                        <div className="model-evidence-header">
+                            <span
+                                className={`model-confidence-chip ${modelProfile.confidence}`}
                             >
-                                <div className="problem-card-header">
-                                    <span className="problem-card-title">
-                                        {kindLabel} ~{center}Hz
+                                {formatModelConfidence(modelProfile.confidence)}
+                            </span>
+                            <span className="model-evidence-title">
+                                {modelProfile.manufacturer} {modelProfile.model}
+                            </span>
+                        </div>
+                        <p className="model-evidence-text">
+                            {modelProfile.responseShape.sourceLabel}
+                        </p>
+                        <div className="model-bounds-grid">
+                            {modelProfile.responseShape.bounds.map((band, index) => (
+                                <div key={`analysis-bound-${index}`} className="model-bounds-row">
+                                    <span className="model-bounds-range">
+                                        {band.lowHz}-{band.highHz} Hz
                                     </span>
-                                    <span className={`problem-severity ${problem.severity}`}>
-                                        {formatSeverity(problem.severity)}
+                                    <span className="model-bounds-delta">
+                                        ±{band.plusMinusDb.toFixed(1)} dB
                                     </span>
                                 </div>
-                                <div className="problem-card-range">
-                                    {Math.round(problem.rangeHz.low)}-{Math.round(problem.rangeHz.high)} Hz
-                                </div>
-                                <div className="problem-card-tags">
-                                    {problem.tags.map(tag => (
-                                        <span key={tag} className="problem-tag">
-                                            {tag.replace('_', ' ')}
-                                        </span>
-                                    ))}
-                                </div>
-                            </button>
-                        )
-                    })}
+                            ))}
+                        </div>
+                    </div>
                 </div>
-            </div>
+            )}
         </div>
     );
 }
