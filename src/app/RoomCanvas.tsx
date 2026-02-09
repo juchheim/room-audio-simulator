@@ -21,7 +21,6 @@ const CANVAS_HEIGHT = 420;
 const COLORS = {
   background: "#fefbf6",
   border: "#b3a894",
-  opening: "#d9582a",
   label: "#5d564a",
   seat: "#2e6f95",
   mains: "#5a4c3b",
@@ -44,6 +43,15 @@ const COLORS = {
   contributionStroke: "#d4c3af",
   contributionText: "#5c4e40",
 };
+
+// 5 distinct colors for multiple openings
+export const OPENING_COLORS = [
+  "#d9582a", // orange (original)
+  "#2e6f95", // blue
+  "#4c8a5d", // green
+  "#8b5b34", // brown
+  "#7a3b7a", // purple
+];
 
 const HEATMAP_STOPS = [
   { value: 0, color: "#fdf5e6" },
@@ -188,7 +196,7 @@ function getOpeningSegment(
 
 export type RoomCanvasProps = {
   room: Room;
-  opening: Opening | null;
+  openings: Opening[];
   snapZones: SnapZone[];
   seat: Seat;
   mains: Mains;
@@ -201,8 +209,6 @@ export type RoomCanvasProps = {
   ghostSubPlacements?: GhostSubPlacement[];
   ghostSeatMoves?: SeatMicroMove[];
   zoneGuidance?: ZoneGuidance;
-  showRipples: boolean;
-  onToggleRipples: (enabled: boolean) => void;
   onSeatChange: (seat: Seat) => void;
   onMainsChange: (mains: Mains) => void;
   onSubwooferChange: (subwoofer: Subwoofer) => void;
@@ -215,7 +221,7 @@ type DragState = { target: DragTarget; pointerId: number } | null;
 
 export function RoomCanvas({
   room,
-  opening,
+  openings,
   snapZones,
   seat,
   mains,
@@ -228,8 +234,6 @@ export function RoomCanvas({
   ghostSubPlacements,
   ghostSeatMoves,
   zoneGuidance,
-  showRipples,
-  onToggleRipples,
   onSeatChange,
   onMainsChange,
   onSubwooferChange,
@@ -364,43 +368,17 @@ export function RoomCanvas({
     [],
   );
 
-  const openingSegment =
-    opening && room
-      ? getOpeningSegment(opening, room, offsetX, offsetY, scale)
-      : null;
+  // Compute opening segments for all openings
+  const openingSegments = React.useMemo(() => {
+    return openings.map((opening, index) => ({
+      opening,
+      index,
+      segment: getOpeningSegment(opening, room, offsetX, offsetY, scale),
+      color: OPENING_COLORS[index % OPENING_COLORS.length],
+    }));
+  }, [openings, room, offsetX, offsetY, scale]);
 
-  const rippleSources = React.useMemo(() => {
-    if (!showRipples) {
-      return [];
-    }
-    const sources: Array<{ x: number; y: number; intensity: number; tone: string }> = [];
-    const subIntensity = getHeatmapValueAt(heatmap, room, subwoofer);
-    sources.push({
-      x: subwoofer.x,
-      y: subwoofer.y,
-      intensity: subIntensity,
-      tone: COLORS.zone,
-    });
-    if (mains.enabled) {
-      const midpoint = {
-        x: (mains.left.x + mains.right.x) / 2,
-        y: (mains.left.y + mains.right.y) / 2,
-      };
-      sources.push({
-        x: midpoint.x,
-        y: midpoint.y,
-        intensity: getHeatmapValueAt(heatmap, room, midpoint) * 0.7,
-        tone: COLORS.label,
-      });
-    }
-    return sources;
-  }, [heatmap, mains, room, showRipples, subwoofer]);
 
-  const rippleBaseRadius = Math.max(
-    12,
-    Math.min(roomPixelWidth, roomPixelHeight) * 0.08,
-  );
-  const rippleDelays = [0, 1.1, 2.2];
 
   const heatmapCells = React.useMemo(() => {
     if (!heatmap) {
@@ -619,30 +597,40 @@ export function RoomCanvas({
                 backgroundColor: "#f4e4d2",
                 borderRadius: "4px",
                 fontWeight: 500,
+                display: "flex",
+                alignItems: "center",
+                gap: "8px",
               }}
             >
-              Heatmap: {Math.round(heatmapRegion.low)}–{Math.round(heatmapRegion.high)} Hz
+              <span>Heatmap: {Math.round(heatmapRegion.low)}–{Math.round(heatmapRegion.high)} Hz</span>
+              <div
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: "4px",
+                  borderLeft: "1px solid rgba(0,0,0,0.1)",
+                  paddingLeft: "8px",
+                  fontSize: "10px",
+                  opacity: 0.8
+                }}
+              >
+                <span>Low</span>
+                <div
+                  style={{
+                    width: "40px",
+                    height: "8px",
+                    borderRadius: "4px",
+                    background: "linear-gradient(to right, #fdf5e6, #f1ba88, #c94a3b)"
+                  }}
+                />
+                <span>High</span>
+              </div>
             </span>
           )}
           <span style={{ fontSize: "12px", color: COLORS.label }}>
             {room.width.toFixed(2)} m × {room.length.toFixed(2)} m
           </span>
-          <label
-            style={{
-              display: "flex",
-              alignItems: "center",
-              gap: "6px",
-              fontSize: "12px",
-              color: COLORS.label,
-            }}
-          >
-            <input
-              type="checkbox"
-              checked={showRipples}
-              onChange={(event) => onToggleRipples(event.target.checked)}
-            />
-            Ripples
-          </label>
+
         </div>
       </div>
       <div
@@ -676,47 +664,23 @@ export function RoomCanvas({
             rx="6"
           />
           {heatmapCells}
-          {showRipples && (
-            <g pointerEvents="none">
-              {rippleSources.map((source, sourceIndex) => {
-                const baseOpacity = 0.08 + source.intensity * 0.16;
-                return (
-                  <g
-                    key={`ripple-${sourceIndex}`}
-                    opacity={baseOpacity}
-                    stroke={source.tone}
-                  >
-                    {rippleDelays.map((delay, ringIndex) => (
-                      <circle
-                        key={`ripple-${sourceIndex}-${ringIndex}`}
-                        className="ripple-ring"
-                        cx={toSvgX(source.x)}
-                        cy={toSvgY(source.y)}
-                        r={rippleBaseRadius}
-                        strokeWidth={1}
-                        style={{ animationDelay: `${delay}s` }}
-                      />
-                    ))}
-                  </g>
-                );
-              })}
-            </g>
-          )}
+
           {snapZones.map(renderZone)}
           {treatments.map(renderTreatment)}
           {ghostSubList.map(renderGhostSubPlacement)}
           {ghostSeatList.map(renderGhostSeatMove)}
-          {openingSegment && (
+          {openingSegments.map(({ opening, index, segment, color }) => (
             <line
-              x1={openingSegment.x1}
-              y1={openingSegment.y1}
-              x2={openingSegment.x2}
-              y2={openingSegment.y2}
-              stroke={COLORS.opening}
+              key={opening.id}
+              x1={segment.x1}
+              y1={segment.y1}
+              x2={segment.x2}
+              y2={segment.y2}
+              stroke={color}
               strokeWidth="6"
               strokeLinecap="round"
             />
-          )}
+          ))}
           <g
             key="seat-marker"
             onPointerDown={(event) => startDrag(event, "seat")}

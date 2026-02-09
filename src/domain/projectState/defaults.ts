@@ -61,7 +61,7 @@ export function createDefaultProjectState(
       length,
       width,
       height,
-      opening: null,
+      openings: [],
     },
     seat: {
       x: seatX,

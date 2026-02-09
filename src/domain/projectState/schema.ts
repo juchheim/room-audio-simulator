@@ -19,6 +19,7 @@ export const DoorStateSchema = z.enum(["open", "closed"]);
 
 export const OpeningSchema = z
   .object({
+    id: z.string().min(1),
     wall: OpeningWallSchema,
     positionAlongWallNorm: z.number().min(0).max(1),
     width: z.number().positive(),
@@ -35,12 +36,14 @@ export const OpeningSchema = z
     }
   });
 
+export const MAX_OPENINGS = 5;
+
 export const RoomSchema = z
   .object({
     length: z.number().positive(),
     width: z.number().positive(),
     height: z.number().positive(),
-    opening: OpeningSchema.nullable().optional(),
+    openings: z.array(OpeningSchema).max(MAX_OPENINGS).default([]),
   })
   .strict();
 

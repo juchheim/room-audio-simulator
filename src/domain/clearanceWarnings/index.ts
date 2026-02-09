@@ -129,7 +129,7 @@ function isOpeningBlocked(room: Room, opening: Opening, sub: Subwoofer): boolean
 
 export function getSubwooferClearanceWarnings(
   room: Room,
-  opening: Opening | null,
+  openings: Opening[],
   subwoofer: Subwoofer,
 ): SubWarning[] {
   const warnings: SubWarning[] = [];
@@ -146,8 +146,11 @@ export function getSubwooferClearanceWarnings(
     warnings.push({ id: "driver_clearance", message: WARNING_COPY.driver_clearance });
   }
 
-  if (opening && isOpeningBlocked(room, opening, subwoofer)) {
-    warnings.push({ id: "opening_blocked", message: WARNING_COPY.opening_blocked });
+  for (const opening of openings) {
+    if (isOpeningBlocked(room, opening, subwoofer)) {
+      warnings.push({ id: "opening_blocked", message: WARNING_COPY.opening_blocked });
+      break;
+    }
   }
 
   return warnings;

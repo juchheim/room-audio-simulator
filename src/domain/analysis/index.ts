@@ -495,9 +495,9 @@ export function computeHeatmapGrid(
 ): HeatmapGrid {
   const rows = options?.rows ?? 18;
   const cols = options?.cols ?? 26;
-  const leakage = getOpeningLeakage(state.room.opening ?? null);
   const seeds = buildModeSeeds(state.room);
   const frequencies = getFrequencySamples(region);
+  const openings = state.room.openings;
 
   const values: number[] = [];
   let minValue = Number.POSITIVE_INFINITY;
@@ -524,7 +524,12 @@ export function computeHeatmapGrid(
             continue;
           }
           const response = computeAxisResponseAtPoint(seed, state, position);
-          weightedSum += response * weight;
+
+          // Calculate position-dependent leakage for this specific mode
+          const modeLeakage = getModeLeakage(openings, state.room, seed);
+          const adjustedResponse = applyLeakageToResponse(response, modeLeakage);
+
+          weightedSum += adjustedResponse * weight;
           weightTotal += weight;
         }
 
@@ -534,9 +539,8 @@ export function computeHeatmapGrid(
           frequency,
           baseResponse,
         );
-        const adjusted = applyLeakageToResponse(directional, leakage);
         const combined =
-          adjusted * (1 - HEATMAP_SOURCE_WEIGHT) +
+          directional * (1 - HEATMAP_SOURCE_WEIGHT) +
           sourceInfluence * HEATMAP_SOURCE_WEIGHT;
         total += combined;
       }
@@ -574,8 +578,8 @@ export function computeResponseCurve(
   const maxHz = options?.maxHz ?? MAX_FREQ;
   const stepHz = options?.stepHz ?? 2.5;
   const treatments = getValidTreatments(state, options?.treatmentsOverride);
-  const leakage = getOpeningLeakage(state.room.opening ?? null);
   const seeds = buildModeSeeds(state.room);
+  const openings = state.room.openings;
   const points: ResponseCurvePoint[] = [];
 
   for (let freq = minHz; freq <= maxHz + 1e-4; freq += stepHz) {
@@ -591,7 +595,12 @@ export function computeResponseCurve(
         continue;
       }
       const response = computeAxisResponse(seed, state);
-      weightedSum += response * weight;
+
+      // Calculate combined leakage from all openings
+      const modeLeakage = getModeLeakage(openings, state.room, seed);
+      const adjustedResponse = applyLeakageToResponse(response, modeLeakage);
+
+      weightedSum += adjustedResponse * weight;
       weightTotal += weight;
     }
 
@@ -601,15 +610,14 @@ export function computeResponseCurve(
       frequency,
       baseResponse,
     );
-    const adjusted = applyLeakageToResponse(directional, leakage);
-    let response = adjusted;
+    let finalResponse = directional;
 
-    if (response >= 0.5) {
+    if (finalResponse >= 0.5) {
       const reduction = getTreatmentPeakReduction(treatments, frequency, regionWidth);
-      response = clamp01(response - reduction / DEVIATION_SCALE);
+      finalResponse = clamp01(finalResponse - reduction / DEVIATION_SCALE);
     }
 
-    points.push({ frequency, response });
+    points.push({ frequency, response: finalResponse });
   }
 
   return points;
@@ -632,23 +640,139 @@ export function getScoreBand(score: number): ScoreBand {
   return "Poor";
 }
 
-function getOpeningLeakage(opening?: Opening | null): number {
+function getOpeningBaseLeakage(
+  opening?: Opening | null,
+  room?: Room | null,
+): number {
   if (!opening) {
     return 0;
   }
 
+  // Base leakage by type/state per documentation
+  let baseLeakage: number;
   switch (opening.type) {
     case "doorway": {
       const doorState = opening.doorState ?? "open";
-      return doorState === "closed" ? 0.15 : 0.35;
+      baseLeakage = doorState === "closed" ? 0.15 : 0.35;
+      break;
     }
     case "hallway":
-      return 0.55;
+      baseLeakage = 0.55;
+      break;
     case "open_plan":
-      return 0.8;
+      baseLeakage = 0.8;
+      break;
     default:
       return 0;
   }
+
+  // Factor in width relative to wall length if room data is available
+  if (room && opening.width > 0) {
+    const wallLength =
+      opening.wall === "front" || opening.wall === "rear"
+        ? room.width
+        : room.length;
+
+    if (wallLength > 0) {
+      // Calculate width ratio (0-1 scale, capped at 1)
+      const widthRatio = clamp01(opening.width / wallLength);
+
+      // Width multiplier: small openings (< 20% of wall) get reduced leakage,
+      // large openings (> 50% of wall) get increased leakage
+      // At 33% (1/3 of wall), the multiplier is 1.0 (baseline)
+      const referenceRatio = 0.33;
+      const widthMultiplier = 0.5 + (widthRatio / referenceRatio) * 0.5;
+
+      baseLeakage = clamp01(baseLeakage * widthMultiplier);
+    }
+  }
+
+  return baseLeakage;
+}
+
+/**
+ * Computes combined base leakage from all openings.
+ * This represents the "average" leakage without specific modal interaction.
+ */
+function getCombinedLeakage(openings: Opening[], room: Room): number {
+  if (openings.length === 0) {
+    return 0;
+  }
+  // Use multiplicative combination: 1 - product(1 - leakage)
+  // This models containment probability (diminishing returns for multiple holes)
+  let containment = 1.0;
+  for (const opening of openings) {
+    containment *= (1 - getOpeningBaseLeakage(opening, room));
+  }
+  return 1 - containment;
+}
+
+/**
+ * Computes leakage for a specific mode seed, applying physical pressure rules:
+ * - Openings on "End Walls" (perpendicular to mode axis) are at pressure ANTINODES (max pressure).
+ * - Openings on "Side Walls" (parallel to mode axis) vary in pressure based on position (cos wave).
+ */
+function getModeLeakage(
+  openings: Opening[],
+  room: Room,
+  seed: { axis: "length" | "width"; order: number },
+): number {
+  if (openings.length === 0) {
+    return 0;
+  }
+
+  let remainingModeEnergy = 1.0;
+
+  for (const opening of openings) {
+    const base = getOpeningBaseLeakage(opening, room);
+    let pressure = 1.0; // Default to max pressure (antinode)
+
+    // Check if opening is on a Side Wall (parallel to mode axis)
+    // If so, pressure varies with position along the wall.
+    // If opening is on an End Wall (perpendicular), pressure is max (1.0).
+    const isSideWall =
+      (seed.axis === "length" && (opening.wall === "left" || opening.wall === "right")) ||
+      (seed.axis === "width" && (opening.wall === "front" || opening.wall === "rear"));
+
+    if (isSideWall) {
+      // Openings on side walls experience the standing wave pressure variation: |cos(n * pi * x)|
+      // positionAlongWallNorm maps correctly to the normalized axis position.
+      pressure = Math.abs(Math.cos(seed.order * Math.PI * opening.positionAlongWallNorm));
+    }
+
+    // Position modifier ranges from 0.5 (at pressure node) to 1.5 (at pressure antinode)
+    // Even at a node, an opening distorts the mode shape enough to cause leakage.
+    const modifier = 0.5 + pressure * 1.0;
+    const leakage = clamp01(base * modifier);
+
+    // Multiplicative accumulation: remaining mode energy *= (1 - leakage)
+    remainingModeEnergy *= (1 - leakage);
+  }
+  return clamp01(1 - remainingModeEnergy);
+}
+
+/**
+ * Computes the average leakage across all room modes, accounting for
+ * position-dependent effects. Used for score calculations.
+ */
+function getAveragedModalLeakage(room: Room): number {
+  const openings = room.openings;
+  if (openings.length === 0) {
+    return 0;
+  }
+
+  // Build mode seeds to determine which modes exist
+  const seeds = buildModeSeeds(room);
+  if (seeds.length === 0) {
+    return getCombinedLeakage(openings, room);
+  }
+
+  let totalLeakage = 0;
+  for (const seed of seeds) {
+    totalLeakage += getModeLeakage(openings, room, seed);
+  }
+
+  return totalLeakage / seeds.length;
 }
 
 function normalizedDistance(value: number, target: number, tolerance: number): number {
@@ -880,7 +1004,7 @@ function isPointInDirectPathKeepOut(
 }
 
 function isOpeningKeepOut(state: ProjectState, point: Point): boolean {
-  if (!state.room.opening) {
+  if (state.room.openings.length === 0) {
     return false;
   }
   const candidateSub = {
@@ -890,7 +1014,7 @@ function isOpeningKeepOut(state: ProjectState, point: Point): boolean {
   };
   const warnings = getSubwooferClearanceWarnings(
     state.room,
-    state.room.opening,
+    state.room.openings,
     candidateSub,
   );
   return warnings.some((warning) => warning.id === "opening_blocked");
@@ -962,7 +1086,7 @@ function getValidTreatments(
   state: ProjectState,
   treatmentsOverride?: Treatment[],
 ): Treatment[] {
-  const snapZones = generateSnapZones(state.room, state.room.opening ?? null);
+  const snapZones = generateSnapZones(state.room, state.room.openings);
   const treatments = treatmentsOverride ?? state.treatments;
   return treatments.filter(
     (treatment) => !isTreatmentInvalid(treatment, snapZones),
@@ -1070,7 +1194,7 @@ function computeSmoothnessScore(
     (SUB_CORNER_DISTANCE - minCornerDistance) / SUB_CORNER_DISTANCE,
   );
 
-  const leakage = getOpeningLeakage(state.room.opening ?? null);
+  const leakage = getAveragedModalLeakage(state.room);
   const treatmentBoost = computeTreatmentBoost(treatments);
 
   let score =
@@ -1122,7 +1246,7 @@ function computeTightnessScore(
     (SUB_CORNER_DISTANCE - minCornerDistance) / SUB_CORNER_DISTANCE,
   );
 
-  const leakage = getOpeningLeakage(state.room.opening ?? null);
+  const leakage = getAveragedModalLeakage(state.room);
   const treatmentBoost = computeTreatmentBoost(treatments);
 
   let score =
@@ -1151,9 +1275,10 @@ function computeConfidenceScore(
   context?: AnalysisContext,
 ): number {
   let score = 0.55;
-  const opening = state.room.opening ?? null;
+  const openings = state.room.openings;
 
-  if (opening) {
+  // Reduce confidence for each opening based on type
+  for (const opening of openings) {
     if (opening.type === "hallway") {
       score -= 0.15;
     }
@@ -1161,6 +1286,10 @@ function computeConfidenceScore(
     if (opening.type === "doorway") {
       const doorState = opening.doorState ?? "open";
       score -= doorState === "open" ? 0.1 : 0.05;
+    }
+
+    if (opening.type === "open_plan") {
+      score = Math.min(score, 0.4);
     }
   }
 
@@ -1185,10 +1314,6 @@ function computeConfidenceScore(
     if (context.selectedBandHz.low >= 80) {
       score -= 0.05;
     }
-  }
-
-  if (opening?.type === "open_plan") {
-    score = Math.min(score, 0.4);
   }
 
   return clamp(score, 0, 1);
@@ -1261,7 +1386,9 @@ function classifySeverity(deviation: number, previousSeverity?: Severity): Sever
 }
 
 function applyLeakageToResponse(response: number, leakage: number): number {
-  const blend = clamp01(leakage * 0.6);
+  // Leakage blends response toward neutral (0.5), flattening peaks and nulls
+  // Higher factor = stronger visual effect from openings
+  const blend = clamp01(leakage * 0.85);
   return response * (1 - blend) + 0.5 * blend;
 }
 
@@ -1557,7 +1684,7 @@ function computeTopProblems(
   noMajorIssues: boolean;
   analysisHistory: AnalysisHistory;
 } {
-  const leakage = getOpeningLeakage(state.room.opening ?? null);
+  const leakage = getCombinedLeakage(state.room.openings, state.room);
   const candidates: ProblemCandidate[] = [];
   const previousSeverities = previousHistory?.candidateSeverities ?? {};
   const previousOrder = previousHistory?.topProblemIds ?? [];
@@ -1780,7 +1907,7 @@ function isSubPlacementAllowed(
   };
   const warnings = getSubwooferClearanceWarnings(
     state.room,
-    state.room.opening ?? null,
+    state.room.openings,
     candidateSub,
   );
   return warnings.length === 0;
@@ -1812,7 +1939,7 @@ function estimateProblemDeviation(
   state: ProjectState,
   treatments: Treatment[],
 ): number {
-  const leakage = getOpeningLeakage(state.room.opening ?? null);
+  const leakage = getCombinedLeakage(state.room.openings, state.room);
 
   if (problem.id === "deep-bass") {
     return buildDeepBassCandidate(state, treatments, leakage, {}).deviation;
@@ -2551,11 +2678,12 @@ function buildTreatmentRecommendationCandidate(
 }
 
 function getFallbackPrimaryLine(state: ProjectState): string {
-  const opening = state.room.opening ?? null;
-  if (
-    opening?.type === "doorway" &&
-    (opening.doorState ?? "open") === "open"
-  ) {
+  const openings = state.room.openings;
+  // Check if any opening is an open doorway
+  const hasOpenDoorway = openings.some(
+    (opening) => opening.type === "doorway" && (opening.doorState ?? "open") === "open"
+  );
+  if (hasOpenDoorway) {
     return FALLBACK_CLOSE_DOOR;
   }
   if (state.constraints.seatLocked) {
@@ -2667,7 +2795,7 @@ export function generateRecommendations(
 ): RecommendationSet {
   const validTreatments = getValidTreatments(state);
   const baselineSmoothness = computeSmoothnessScore(state, validTreatments);
-  const snapZones = generateSnapZones(state.room, state.room.opening ?? null);
+  const snapZones = generateSnapZones(state.room, state.room.openings);
   const candidates: RecommendationCandidate[] = [];
 
   const placements = generateGhostSubPlacements(state, problem);
@@ -2894,19 +3022,19 @@ export function analyzeProjectState(
     smoothnessScore,
     context?.previousAnalysis?.analysisHistory,
   );
-  const snapZones = generateSnapZones(state.room, state.room.opening ?? null);
+  const snapZones = generateSnapZones(state.room, state.room.openings);
   const topProblemsWithTags = topProblems.noMajorIssues
     ? []
     : topProblems.topProblems.map((problem) =>
-        applyFixabilityTags(
-          problem,
-          state,
-          validTreatments,
-          snapZones,
-          topProblems.topProblems,
-          smoothnessScore,
-        ),
-      );
+      applyFixabilityTags(
+        problem,
+        state,
+        validTreatments,
+        snapZones,
+        topProblems.topProblems,
+        smoothnessScore,
+      ),
+    );
 
   return {
     smoothnessScore,

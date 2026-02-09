@@ -18,11 +18,17 @@ v1 is a directional, decision-support simulation, not a lab instrument. It must:
   - pressurization (reduced room gain),
   - modal Q (softened peaks, shorter ringing),
   - confidence reduction when large/open-plan.
-- Opening leakage factor (L) by type/state (locked):
+- Opening leakage factor (L) by type/state (base values):
   - doorway closed: L = 0.15
   - doorway open: L = 0.35
   - hallway: L = 0.55
   - open_plan: L = 0.80
+- Opening width factor: Base leakage is scaled by (width / wall_length) relative to a 33% reference.
+  Smaller openings reduce leakage; larger openings increase it.
+- Opening position factor: Leakage varies by mode based on opening position along the wall.
+  - Opening at a pressure antinode (modal peak) = increased leakage for that mode
+  - Opening at a pressure node (modal null) = reduced leakage for that mode
+  - Position modifier ranges ±70% based on cos(order × π × position)
 - No adjacent-room geometry is modeled in v1.
 
 4. Modal Behavior Representation (Conceptual)
@@ -32,7 +38,6 @@ v1 should represent bass behavior primarily via:
 - pressure/energy distributions in top-down view.
 v1 is not a high-frequency ray tracer. “Waves bouncing” in the UI should be expressed as:
 - pressure/energy heatmaps,
-- subtle animated “ripples” as a teaching/intuition layer,
 not literal geometric reflections.
 
 5. Sources

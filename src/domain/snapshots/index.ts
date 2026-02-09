@@ -5,7 +5,7 @@ import type {
   ScoreBand,
   TopProblem,
 } from "../analysis";
-import type { ProjectState, Treatment } from "../projectState";
+import type { Opening, ProjectState, Treatment } from "../projectState";
 import { deserializeProjectState, serializeProjectState } from "../projectState";
 import { generateSnapZones } from "../snapZones";
 import { getTreatmentLabel, isTreatmentInvalid } from "../treatments";
@@ -156,10 +156,7 @@ function buildSubChangeLog(prev: ProjectState, next: ProjectState): string | nul
   return `${prefix}: ${parts.join("; ")}`;
 }
 
-function formatOpeningSummary(opening: ProjectState["room"]["opening"]): string {
-  if (!opening) {
-    return "";
-  }
+function formatOpeningSummary(opening: Opening): string {
   const doorState =
     opening.type === "doorway" && opening.doorState
       ? `, door ${opening.doorState}`
@@ -169,29 +166,7 @@ function formatOpeningSummary(opening: ProjectState["room"]["opening"]): string 
   )}${doorState})`;
 }
 
-function buildOpeningChangeLog(
-  prev: ProjectState,
-  next: ProjectState,
-): string | null {
-  const prevOpening = prev.room.opening ?? null;
-  const nextOpening = next.room.opening ?? null;
-
-  if (!prevOpening && !nextOpening) {
-    return null;
-  }
-  if (!prevOpening && nextOpening) {
-    return `Opening added: ${formatOpeningSummary(nextOpening)}`;
-  }
-  if (prevOpening && !nextOpening) {
-    return "Opening removed.";
-  }
-
-  // At this point, both prevOpening and nextOpening must be non-null
-  // Add explicit guard to satisfy TypeScript's null safety
-  if (!prevOpening || !nextOpening) {
-    return null;
-  }
-
+function buildOpeningDiffParts(prevOpening: Opening, nextOpening: Opening): string[] {
   const parts: string[] = [];
   if (prevOpening.wall !== nextOpening.wall) {
     parts.push(`wall ${prevOpening.wall} -> ${nextOpening.wall}`);
@@ -218,15 +193,50 @@ function buildOpeningChangeLog(
   const prevDoor = prevOpening.doorState ?? "";
   const nextDoor = nextOpening.doorState ?? "";
   if (prevDoor !== nextDoor) {
-    const doorLabel = `door ${prevDoor || "n/a"} -> ${nextDoor || "n/a"}`;
-    parts.push(doorLabel);
+    parts.push(`door ${prevDoor || "n/a"} -> ${nextDoor || "n/a"}`);
   }
 
-  if (parts.length === 0) {
-    return null;
+  return parts;
+}
+
+function buildOpeningChangeLog(
+  prev: ProjectState,
+  next: ProjectState,
+): string[] {
+  const prevMap = new Map(prev.room.openings.map((opening) => [opening.id, opening]));
+  const nextMap = new Map(next.room.openings.map((opening) => [opening.id, opening]));
+  const added: Opening[] = [];
+  const removed: Opening[] = [];
+  const updated: string[] = [];
+
+  for (const [id, opening] of nextMap.entries()) {
+    if (!prevMap.has(id)) {
+      added.push(opening);
+    }
   }
 
-  return `Opening updated: ${parts.join("; ")}`;
+  for (const [id, opening] of prevMap.entries()) {
+    const nextOpening = nextMap.get(id);
+    if (!nextOpening) {
+      removed.push(opening);
+      continue;
+    }
+    const parts = buildOpeningDiffParts(opening, nextOpening);
+    if (parts.length > 0) {
+      updated.push(`Opening updated (${nextOpening.id.slice(0, 8)}): ${parts.join("; ")}`);
+    }
+  }
+
+  const lines: string[] = [];
+  if (added.length > 0) {
+    lines.push(`Openings added: ${added.map(formatOpeningSummary).join(", ")}`);
+  }
+  if (removed.length > 0) {
+    lines.push(`Openings removed: ${removed.map(formatOpeningSummary).join(", ")}`);
+  }
+  lines.push(...updated);
+
+  return lines;
 }
 
 function formatTreatmentLabel(treatment: Treatment): string {
@@ -246,8 +256,8 @@ function buildTreatmentChangeLog(
   prev: ProjectState,
   next: ProjectState,
 ): string[] {
-  const prevZones = generateSnapZones(prev.room, prev.room.opening ?? null);
-  const nextZones = generateSnapZones(next.room, next.room.opening ?? null);
+  const prevZones = generateSnapZones(prev.room, prev.room.openings);
+  const nextZones = generateSnapZones(next.room, next.room.openings);
   const prevMap = new Map(prev.treatments.map((treatment) => [treatment.id, treatment]));
   const nextMap = new Map(next.treatments.map((treatment) => [treatment.id, treatment]));
 
@@ -342,10 +352,7 @@ export function buildChangeLog(
     entries.push(subLine);
   }
 
-  const openingLine = buildOpeningChangeLog(prev, next);
-  if (openingLine) {
-    entries.push(openingLine);
-  }
+  entries.push(...buildOpeningChangeLog(prev, next));
 
   entries.push(...buildTreatmentChangeLog(prev, next));
 

@@ -1,7 +1,13 @@
 import React from "react";
-import { RoomCanvas } from "./RoomCanvas";
+import { RoomCanvas, OPENING_COLORS } from "./RoomCanvas";
+import { ControlDeck } from "./components/ControlDeck";
+import { SetupPanel } from "./components/SetupPanel";
+import { TreatmentsPanel } from "./components/TreatmentsPanel";
+import { AnalysisPanel } from "./components/AnalysisPanel";
+import { SnapshotsPanel } from "./components/SnapshotsPanel";
 import type {
   Mains,
+  Opening,
   Room,
   Seat,
   Subwoofer,
@@ -9,7 +15,11 @@ import type {
   ProjectConstraints,
   Units,
 } from "../domain/projectState";
-import { createDefaultProjectState } from "../domain/projectState";
+import {
+  createDefaultProjectState,
+  MAX_OPENINGS,
+  normalizeSubwooferForMode,
+} from "../domain/projectState";
 import { buildPlanMarkdown, buildProjectJson } from "../domain/export";
 import type { Snapshot, SnapshotSlot } from "../domain/snapshots";
 import {
@@ -141,6 +151,64 @@ function parseInputToMeters(value: string, units: Units): number {
   return parsed;
 }
 
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value));
+}
+
+function sanitizePositive(value: number, fallback: number): number {
+  if (!Number.isFinite(value) || value <= 0) {
+    return fallback;
+  }
+  return value;
+}
+
+function clampToRoom(position: { x: number; y: number }, room: Room): {
+  x: number;
+  y: number;
+} {
+  return {
+    x: clamp(position.x, 0, room.width),
+    y: clamp(position.y, 0, room.length),
+  };
+}
+
+function normalizeOpening(opening: Opening): Opening {
+  const normalized = {
+    ...opening,
+    positionAlongWallNorm: clamp(opening.positionAlongWallNorm, 0, 1),
+    width: sanitizePositive(opening.width, 0.01),
+  };
+  if (normalized.type === "doorway") {
+    return {
+      ...normalized,
+      doorState: normalized.doorState ?? "open",
+    };
+  }
+  return {
+    ...normalized,
+    doorState: undefined,
+  };
+}
+
+const OPENING_PRESET_WIDTHS: Record<Opening["type"], number> = {
+  doorway: 0.914, // 3 ft
+  hallway: 1.219, // 4 ft
+  open_plan: 2.438, // 8 ft
+};
+
+const OPENING_TYPE_LABELS: Record<Opening["type"], string> = {
+  doorway: "Doorway",
+  hallway: "Hallway",
+  open_plan: "Open-plan",
+};
+
+const WALL_LABELS: Record<Opening["wall"], string> = {
+  front: "Front",
+  rear: "Rear",
+  left: "Left",
+  right: "Right",
+};
+
 function formatSignedNumber(value: number, decimals = 0): string {
   const rounded = Number(value.toFixed(decimals));
   const sign = rounded >= 0 ? "+" : "";
@@ -201,7 +269,6 @@ export function App(): React.ReactElement {
     null,
   );
   const previousAnalysisRef = React.useRef<AnalysisResult | null>(null);
-  const [showRipples, setShowRipples] = React.useState(true);
   const [snapshots, setSnapshots] = React.useState<SnapshotState>({
     A: null,
     B: null,
@@ -213,13 +280,61 @@ export function App(): React.ReactElement {
   const [editingTreatmentId, setEditingTreatmentId] = React.useState<string | null>(
     null,
   );
-  const [newTreatmentType, setNewTreatmentType] =
-    React.useState<TreatmentType>("corner_trap");
-  const [newTreatmentStrength, setNewTreatmentStrength] =
-    React.useState<TreatmentStrength>("medium");
-  const [newTreatmentTargetHz, setNewTreatmentTargetHz] =
-    React.useState<number>(63);
-  const [newTreatmentZoneId, setNewTreatmentZoneId] = React.useState<string>("");
+
+  const addTreatment = React.useCallback(
+    (
+      type: TreatmentType,
+      strength: TreatmentStrength,
+      zoneId: string,
+      targetHz: number,
+    ) => {
+      if (!zoneId || isTreatmentCapReached(type, state.treatments)) {
+        return;
+      }
+
+      const id =
+        typeof globalThis.crypto?.randomUUID === "function"
+          ? globalThis.crypto.randomUUID()
+          : `tr_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+
+      const base: Treatment = {
+        id,
+        type,
+        strength,
+        snapZoneId: zoneId,
+        coveragePreset: "standard",
+        ...(type === "tuned_trap" ? { targetHz: Math.max(20, targetHz) } : {}),
+      };
+
+      setState((prev) => ({
+        ...prev,
+        treatments: [...prev.treatments, base],
+        updatedAt: new Date().toISOString(),
+      }));
+    },
+    [state.treatments],
+  );
+
+  const updateTreatment = React.useCallback(
+    (id: string, updates: Partial<Treatment>) => {
+      setState((prev) => ({
+        ...prev,
+        treatments: prev.treatments.map((treatment) =>
+          treatment.id === id ? { ...treatment, ...updates } : treatment,
+        ),
+        updatedAt: new Date().toISOString(),
+      }));
+    },
+    [],
+  );
+
+  const removeTreatment = React.useCallback((id: string) => {
+    setState((prev) => ({
+      ...prev,
+      treatments: prev.treatments.filter((treatment) => treatment.id !== id),
+      updatedAt: new Date().toISOString(),
+    }));
+  }, []);
 
   const updateSeat = React.useCallback((seat: Seat) => {
     setState((prev) => ({
@@ -239,12 +354,12 @@ export function App(): React.ReactElement {
 
 
   const updateSubwoofer = React.useCallback((subwoofer: Subwoofer) => {
-    // Clear analysis history when subwoofer position changes
-    // to prevent hysteresis from keeping severity levels locked
+    // Clear analysis history whenever sub changes to avoid stale hysteresis artifacts.
     previousAnalysisRef.current = null;
+    const normalized = normalizeSubwooferForMode(subwoofer);
     setState((prev) => ({
       ...prev,
-      subwoofer,
+      subwoofer: normalized,
       updatedAt: new Date().toISOString(),
     }));
   }, []);
@@ -252,11 +367,32 @@ export function App(): React.ReactElement {
   const updateRoom = React.useCallback(
     (updates: Partial<Room>) => {
       previousAnalysisRef.current = null;
-      setState((prev) => ({
-        ...prev,
-        room: { ...prev.room, ...updates },
-        updatedAt: new Date().toISOString(),
-      }));
+      setState((prev) => {
+        const mergedRoom = { ...prev.room, ...updates };
+        const normalizedRoom: Room = {
+          ...mergedRoom,
+          width: sanitizePositive(mergedRoom.width, prev.room.width),
+          length: sanitizePositive(mergedRoom.length, prev.room.length),
+          height: sanitizePositive(mergedRoom.height, prev.room.height),
+          openings: mergedRoom.openings.map(normalizeOpening),
+        };
+
+        return {
+          ...prev,
+          room: normalizedRoom,
+          seat: clampToRoom(prev.seat, normalizedRoom),
+          mains: {
+            ...prev.mains,
+            left: clampToRoom(prev.mains.left, normalizedRoom),
+            right: clampToRoom(prev.mains.right, normalizedRoom),
+          },
+          subwoofer: {
+            ...prev.subwoofer,
+            ...clampToRoom(prev.subwoofer, normalizedRoom),
+          },
+          updatedAt: new Date().toISOString(),
+        };
+      });
     },
     [],
   );
@@ -265,6 +401,73 @@ export function App(): React.ReactElement {
     setState((prev) => ({
       ...prev,
       units,
+      updatedAt: new Date().toISOString(),
+    }));
+  }, []);
+
+  const generateOpeningId = React.useCallback((): string => {
+    if (typeof globalThis.crypto?.randomUUID === "function") {
+      return globalThis.crypto.randomUUID();
+    }
+    return `op_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+  }, []);
+
+  const addOpening = React.useCallback(() => {
+    previousAnalysisRef.current = null;
+    setState((prev) => {
+      if (prev.room.openings.length >= MAX_OPENINGS) {
+        return prev;
+      }
+      const newOpening: Opening = {
+        id: generateOpeningId(),
+        wall: "rear",
+        positionAlongWallNorm: 0.5,
+        width: OPENING_PRESET_WIDTHS.doorway,
+        type: "doorway",
+        doorState: "open",
+      };
+      return {
+        ...prev,
+        room: {
+          ...prev.room,
+          openings: [...prev.room.openings, newOpening],
+        },
+        updatedAt: new Date().toISOString(),
+      };
+    });
+  }, [generateOpeningId]);
+
+  const updateOpening = React.useCallback(
+    (id: string, updates: Partial<Opening>) => {
+      previousAnalysisRef.current = null;
+      setState((prev) => {
+        const openings = prev.room.openings.map((opening) => {
+          if (opening.id !== id) {
+            return opening;
+          }
+          return normalizeOpening({ ...opening, ...updates });
+        });
+        return {
+          ...prev,
+          room: {
+            ...prev.room,
+            openings,
+          },
+          updatedAt: new Date().toISOString(),
+        };
+      });
+    },
+    [],
+  );
+
+  const removeOpening = React.useCallback((id: string) => {
+    previousAnalysisRef.current = null;
+    setState((prev) => ({
+      ...prev,
+      room: {
+        ...prev.room,
+        openings: prev.room.openings.filter((opening) => opening.id !== id),
+      },
       updatedAt: new Date().toISOString(),
     }));
   }, []);
@@ -347,8 +550,13 @@ export function App(): React.ReactElement {
       if (!snapshot) {
         return;
       }
-      previousAnalysisRef.current = null;
-      setState(restoreSnapshot(snapshot));
+      try {
+        const restored = restoreSnapshot(snapshot);
+        previousAnalysisRef.current = null;
+        setState(restored);
+      } catch (error) {
+        console.error("Failed to restore snapshot:", error);
+      }
     },
     [snapshots],
   );
@@ -384,8 +592,8 @@ export function App(): React.ReactElement {
   }, []);
 
   const snapZones = React.useMemo(
-    () => generateSnapZones(state.room, state.room.opening ?? null),
-    [state.room, state.room.opening],
+    () => generateSnapZones(state.room, state.room.openings),
+    [state.room, state.room.openings],
   );
 
   const treatmentCounts = React.useMemo(
@@ -404,82 +612,17 @@ export function App(): React.ReactElement {
     () =>
       getSubwooferClearanceWarnings(
         state.room,
-        state.room.opening ?? null,
+        state.room.openings,
         state.subwoofer,
       ),
     [state.room, state.subwoofer],
   );
-
-  const eligibleZones = React.useMemo(
-    () => getEligibleZones(newTreatmentType, snapZones),
-    [newTreatmentType, snapZones],
-  );
-
-  React.useEffect(() => {
-    if (!eligibleZones.some((zone) => zone.id === newTreatmentZoneId)) {
-      setNewTreatmentZoneId(eligibleZones[0]?.id ?? "");
-    }
-  }, [eligibleZones, newTreatmentZoneId]);
 
   React.useEffect(() => {
     if (!analysis.topProblems.some((problem) => problem.id === selectedProblemId)) {
       setSelectedProblemId(null);
     }
   }, [analysis.topProblems, selectedProblemId]);
-
-  const addTreatment = React.useCallback(() => {
-    if (!newTreatmentZoneId || isTreatmentCapReached(newTreatmentType, state.treatments)) {
-      return;
-    }
-
-    const id = typeof globalThis.crypto?.randomUUID === "function"
-      ? globalThis.crypto.randomUUID()
-      : `tr_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
-
-    const base: Treatment = {
-      id,
-      type: newTreatmentType,
-      strength: newTreatmentStrength,
-      snapZoneId: newTreatmentZoneId,
-      coveragePreset: "standard",
-      ...(newTreatmentType === "tuned_trap"
-        ? { targetHz: Math.max(20, newTreatmentTargetHz) }
-        : {}),
-    };
-
-    setState((prev) => ({
-      ...prev,
-      treatments: [...prev.treatments, base],
-      updatedAt: new Date().toISOString(),
-    }));
-  }, [
-    newTreatmentStrength,
-    newTreatmentTargetHz,
-    newTreatmentType,
-    newTreatmentZoneId,
-    state.treatments,
-  ]);
-
-  const updateTreatment = React.useCallback(
-    (id: string, updater: (treatment: Treatment) => Treatment) => {
-      setState((prev) => ({
-        ...prev,
-        treatments: prev.treatments.map((treatment) =>
-          treatment.id === id ? updater(treatment) : treatment,
-        ),
-        updatedAt: new Date().toISOString(),
-      }));
-    },
-    [],
-  );
-
-  const removeTreatment = React.useCallback((id: string) => {
-    setState((prev) => ({
-      ...prev,
-      treatments: prev.treatments.filter((treatment) => treatment.id !== id),
-      updatedAt: new Date().toISOString(),
-    }));
-  }, []);
 
   const selectedProblem = analysis.topProblems.find(
     (problem) => problem.id === selectedProblemId,
@@ -495,11 +638,13 @@ export function App(): React.ReactElement {
     [analysis.confidenceLevel],
   );
   const ghostSubPlacements = React.useMemo(
-    () => (selectedProblem ? generateGhostSubPlacements(state, selectedProblem) : []),
+    () =>
+      selectedProblem ? generateGhostSubPlacements(state, selectedProblem) : [],
     [selectedProblem, state],
   );
   const ghostSeatMoves = React.useMemo(
-    () => (selectedProblem ? generateSeatMicroMoves(state, selectedProblem) : []),
+    () =>
+      selectedProblem ? generateSeatMicroMoves(state, selectedProblem) : [],
     [selectedProblem, state],
   );
   const treatmentZoneGuidance = React.useMemo<ZoneGuidance | null>(() => {
@@ -647,41 +792,50 @@ export function App(): React.ReactElement {
   );
 
   const handleExportProjectJson = React.useCallback(() => {
-    const contents = buildProjectJson(state);
-    downloadFile(contents, `${exportBaseName}-project.json`, "application/json");
-    setExportMenu(null);
+    try {
+      const contents = buildProjectJson(state);
+      downloadFile(contents, `${exportBaseName}-project.json`, "application/json");
+      setExportMenu(null);
+    } catch (error) {
+      console.error("Failed to export project JSON:", error);
+    }
   }, [exportBaseName, state]);
 
   const handleExportPlanMarkdown = React.useCallback(() => {
-    const contents = buildPlanMarkdown(state, analysis, {
-      now: new Date(),
-      compareSummary: exportCompareSummary,
-    });
-    downloadFile(contents, `${exportBaseName}-plan.md`, "text/markdown");
-    setExportMenu(null);
+    try {
+      const contents = buildPlanMarkdown(state, analysis, {
+        now: new Date(),
+        compareSummary: exportCompareSummary,
+      });
+      downloadFile(contents, `${exportBaseName}-plan.md`, "text/markdown");
+      setExportMenu(null);
+    } catch (error) {
+      console.error("Failed to export plan markdown:", error);
+    }
   }, [analysis, exportBaseName, exportCompareSummary, state]);
 
   return (
-    <div
-      style={{
-        minHeight: "100vh",
-        background: "#f6f4ef",
-        color: "#1f1f1f",
-        fontFamily: "" +
-          "\"Source Serif 4\", \"Times New Roman\", serif",
-        padding: "24px",
-      }}
-    >
-      <header style={{ marginBottom: "16px" }}>
-        <h1 style={{ margin: 0, fontSize: "28px" }}>Room Audio Simulator</h1>
-        <p style={{ margin: "6px 0 0", opacity: 0.7 }}>
-          v1 — two-channel sweet spot bass simulator
-        </p>
+    <div className="app-container">
+      <header className="app-header">
+        <div>
+          <h1>Room Audio Simulator</h1>
+          <p>v1 — two-channel sweet spot bass simulator</p>
+        </div>
+        <div>
+          <button
+            type="button"
+            className="deck-button secondary"
+            onClick={() => handleExportPlanMarkdown()}
+          >
+            Export Plan
+          </button>
+        </div>
       </header>
-      <div className="app-layout">
+
+      <div className="stage-area">
         <RoomCanvas
           room={state.room}
-          opening={state.room.opening ?? null}
+          openings={state.room.openings}
           snapZones={snapZones}
           seat={state.seat}
           mains={state.mains}
@@ -694,836 +848,51 @@ export function App(): React.ReactElement {
           ghostSubPlacements={ghostSubPlacements}
           ghostSeatMoves={ghostSeatMoves}
           zoneGuidance={treatmentZoneGuidance ?? undefined}
-          showRipples={showRipples}
-          onToggleRipples={setShowRipples}
           onSeatChange={updateSeat}
           onMainsChange={updateMains}
           onSubwooferChange={updateSubwoofer}
           onApplyGhostSubPlacement={applyGhostSubPlacement}
           onApplySeatMove={applySeatMove}
         />
-        <aside className="panel-stack">
-          <section className="panel-card">
-            <div className="panel-header">
-              <h3 className="panel-title">Results</h3>
-              <button
-                type="button"
-                className="treatment-button secondary"
-                onClick={() => toggleExportMenu("results")}
-              >
-                Generate Plan (Export)
-              </button>
-            </div>
-            {exportMenu === "results" && (
-              <div className="export-options">
-                <button
-                  type="button"
-                  className="treatment-button"
-                  onClick={handleExportProjectJson}
-                >
-                  Download Project JSON
-                </button>
-                <button
-                  type="button"
-                  className="treatment-button"
-                  onClick={handleExportPlanMarkdown}
-                >
-                  Download Plan (Markdown)
-                </button>
-              </div>
-            )}
-            <div className="panel-row">
-              <span>Smoothness</span>
-              <span>
-                {analysis.smoothnessScore} ({analysis.smoothnessBand})
-              </span>
-            </div>
-            <div className="panel-row">
-              <span>Tightness</span>
-              <span>
-                {analysis.tightnessScore} ({analysis.tightnessBand})
-              </span>
-            </div>
-            <div className="panel-row">
-              <span>Confidence</span>
-              <span>{analysis.confidenceLevel}</span>
-            </div>
-          </section>
-          <section className="panel-card">
-            <h3 className="panel-title">Room Setup</h3>
-            <label className="panel-row panel-toggle">
-              <span>Units</span>
-              <select
-                value={state.units}
-                onChange={(event) =>
-                  updateUnits(event.target.value as Units)
-                }
-              >
-                <option value="imperial">Imperial (ft)</option>
-                <option value="metric">Metric (m)</option>
-              </select>
-            </label>
-            <div className="panel-row">
-              <label className="room-input-label">
-                <span>Length ({state.units === "imperial" ? "ft" : "m"})</span>
-                <input
-                  type="number"
-                  min={state.units === "imperial" ? 6 : 2}
-                  max={state.units === "imperial" ? 100 : 30}
-                  step={state.units === "imperial" ? 0.5 : 0.1}
-                  value={displayValue(state.room.length, state.units)}
-                  onChange={(event) => {
-                    const meters = parseInputToMeters(event.target.value, state.units);
-                    if (meters > 0) {
-                      updateRoom({ length: meters });
-                    }
-                  }}
-                  className="room-input"
-                />
-              </label>
-            </div>
-            <div className="panel-row">
-              <label className="room-input-label">
-                <span>Width ({state.units === "imperial" ? "ft" : "m"})</span>
-                <input
-                  type="number"
-                  min={state.units === "imperial" ? 6 : 2}
-                  max={state.units === "imperial" ? 100 : 30}
-                  step={state.units === "imperial" ? 0.5 : 0.1}
-                  value={displayValue(state.room.width, state.units)}
-                  onChange={(event) => {
-                    const meters = parseInputToMeters(event.target.value, state.units);
-                    if (meters > 0) {
-                      updateRoom({ width: meters });
-                    }
-                  }}
-                  className="room-input"
-                />
-              </label>
-            </div>
-            <div className="panel-row">
-              <label className="room-input-label">
-                <span>Height ({state.units === "imperial" ? "ft" : "m"})</span>
-                <input
-                  type="number"
-                  min={state.units === "imperial" ? 6 : 2}
-                  max={state.units === "imperial" ? 20 : 6}
-                  step={state.units === "imperial" ? 0.5 : 0.1}
-                  value={displayValue(state.room.height, state.units)}
-                  onChange={(event) => {
-                    const meters = parseInputToMeters(event.target.value, state.units);
-                    if (meters > 0) {
-                      updateRoom({ height: meters });
-                    }
-                  }}
-                  className="room-input"
-                />
-              </label>
-            </div>
-          </section>
-          <section className="panel-card">
-            <h3 className="panel-title">Constraints</h3>
-            <label className="panel-row panel-toggle">
-              <span>Lock seat position</span>
-              <input
-                type="checkbox"
-                checked={state.constraints.seatLocked}
-                onChange={(event) =>
-                  updateConstraints({ seatLocked: event.target.checked })
-                }
-              />
-            </label>
-            <label className="panel-row panel-toggle">
-              <span>Allow nearfield sub suggestions</span>
-              <input
-                type="checkbox"
-                checked={state.constraints.allowNearfieldSuggestions}
-                onChange={(event) =>
-                  updateConstraints({
-                    allowNearfieldSuggestions: event.target.checked,
-                  })
-                }
-              />
-            </label>
-          </section>
-          <section className="panel-card">
-            <h3 className="panel-title">Snapshots</h3>
-            <div className="snapshot-row">
-              <button
-                type="button"
-                className="treatment-button"
-                disabled={snapshots.lockA && Boolean(snapshots.A)}
-                onClick={() => saveSnapshot("A")}
-              >
-                Save A
-              </button>
-              <button
-                type="button"
-                className="treatment-button secondary"
-                disabled={!snapshots.A}
-                onClick={() => loadSnapshot("A")}
-              >
-                Load A
-              </button>
-            </div>
-            <label className="panel-row panel-toggle">
-              <span>Lock A</span>
-              <input
-                type="checkbox"
-                checked={snapshots.lockA}
-                onChange={(event) => toggleLockA(event.target.checked)}
-              />
-            </label>
-            {snapshots.A && (
-              <div className="snapshot-meta">
-                A saved: {snapshots.A.savedAt.replace("T", " ").slice(0, 19)}
-              </div>
-            )}
-            <div className="snapshot-row">
-              <button
-                type="button"
-                className="treatment-button"
-                onClick={() => saveSnapshot("B")}
-              >
-                Save B
-              </button>
-              <button
-                type="button"
-                className="treatment-button secondary"
-                disabled={!snapshots.B}
-                onClick={() => loadSnapshot("B")}
-              >
-                Load B
-              </button>
-            </div>
-            {snapshots.B && (
-              <div className="snapshot-meta">
-                B saved: {snapshots.B.savedAt.replace("T", " ").slice(0, 19)}
-              </div>
-            )}
-          </section>
-          {compareData && compareMetrics && (
-            <section className="panel-card compare-panel">
-              <h3 className="panel-title">Compare</h3>
-              <div className="compare-actions">
-                <button
-                  type="button"
-                  className="treatment-button secondary"
-                  onClick={() => loadSnapshot("A")}
-                >
-                  Revert to A
-                </button>
-                <button
-                  type="button"
-                  className="treatment-button secondary"
-                  onClick={() => toggleExportMenu("compare")}
-                >
-                  Generate Plan (Export)
-                </button>
-              </div>
-              {exportMenu === "compare" && (
-                <div className="export-options">
-                  <button
-                    type="button"
-                    className="treatment-button"
-                    onClick={handleExportProjectJson}
-                  >
-                    Download Project JSON
-                  </button>
-                  <button
-                    type="button"
-                    className="treatment-button"
-                    onClick={handleExportPlanMarkdown}
-                  >
-                    Download Plan (Markdown)
-                  </button>
-                </div>
-              )}
-              <div className="compare-metrics">
-                <div className="compare-metric">
-                  <div className="compare-metric-label">Smoothness</div>
-                  <div className="compare-metric-values">
-                    <span>A {compareMetrics.a.smoothnessScore}</span>
-                    <span>B {compareMetrics.b.smoothnessScore}</span>
-                    <span
-                      className={`compare-delta ${compareMetrics.smoothnessDelta >= 0 ? "positive" : "negative"
-                        }`}
-                    >
-                      Change {formatSignedNumber(compareMetrics.smoothnessDelta)}
-                    </span>
-                  </div>
-                </div>
-                <div className="compare-metric">
-                  <div className="compare-metric-label">Tightness</div>
-                  <div className="compare-metric-values">
-                    <span>A {compareMetrics.a.tightnessScore}</span>
-                    <span>B {compareMetrics.b.tightnessScore}</span>
-                    <span
-                      className={`compare-delta ${compareMetrics.tightnessDelta >= 0 ? "positive" : "negative"
-                        }`}
-                    >
-                      Change {formatSignedNumber(compareMetrics.tightnessDelta)}
-                    </span>
-                  </div>
-                </div>
-                <div className="compare-metric">
-                  <div className="compare-metric-label">Confidence</div>
-                  <div className="compare-metric-values">
-                    <span>A {compareMetrics.a.confidenceLevel}</span>
-                    <span>B {compareMetrics.b.confidenceLevel}</span>
-                    <span
-                      className={`compare-delta ${compareMetrics.confidenceDelta >= 0 ? "positive" : "negative"
-                        }`}
-                    >
-                      Score {formatSignedNumber(compareMetrics.confidenceDelta, 2)}
-                    </span>
-                  </div>
-                </div>
-              </div>
-              <div className="compare-section">
-                <div className="compare-section-title">Top Problems</div>
-                <div className="compare-problem-header">
-                  <span>A</span>
-                  <span>B</span>
-                </div>
-                <div className="compare-problem-table">
-                  {compareData.matches.map((match, index) => (
-                    <div
-                      key={`${match.a?.id ?? "none"}-${match.b?.id ?? "none"}-${index}`}
-                      className="compare-problem-row"
-                    >
-                      <div className="compare-problem-col">
-                        {match.a ? (
-                          <span>{formatProblemLabel(match.a)}</span>
-                        ) : (
-                          <span className="compare-empty">n/a</span>
-                        )}
-                        {match.status === "resolved" && (
-                          <span className="compare-tag resolved">Resolved</span>
-                        )}
-                      </div>
-                      <div className="compare-problem-col">
-                        {match.b ? (
-                          <span>{formatProblemLabel(match.b)}</span>
-                        ) : (
-                          <span className="compare-empty">n/a</span>
-                        )}
-                        {match.status === "new" && (
-                          <span className="compare-tag new">New</span>
-                        )}
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-              <div className="compare-section">
-                <div className="compare-section-title">Curve (20-120)</div>
-                <svg
-                  className="compare-curve"
-                  viewBox={`0 0 ${CURVE_VIEWBOX_WIDTH} ${CURVE_VIEWBOX_HEIGHT}`}
-                  role="img"
-                  aria-label="Frequency response comparison"
-                >
-                  {compareMetrics.a.topProblems.map((problem, index) => {
-                    const low = Math.max(CURVE_MIN_HZ, problem.rangeHz.low);
-                    const high = Math.min(CURVE_MAX_HZ, problem.rangeHz.high);
-                    const x =
-                      ((low - CURVE_MIN_HZ) / (CURVE_MAX_HZ - CURVE_MIN_HZ)) *
-                      CURVE_VIEWBOX_WIDTH;
-                    const width =
-                      ((high - low) / (CURVE_MAX_HZ - CURVE_MIN_HZ)) *
-                      CURVE_VIEWBOX_WIDTH;
-                    return (
-                      <rect
-                        key={`a-${problem.id}-${index}`}
-                        className="compare-curve-region a"
-                        x={x}
-                        y={0}
-                        width={Math.max(1, width)}
-                        height={CURVE_VIEWBOX_HEIGHT}
-                      />
-                    );
-                  })}
-                  {compareMetrics.b.topProblems.map((problem, index) => {
-                    const low = Math.max(CURVE_MIN_HZ, problem.rangeHz.low);
-                    const high = Math.min(CURVE_MAX_HZ, problem.rangeHz.high);
-                    const x =
-                      ((low - CURVE_MIN_HZ) / (CURVE_MAX_HZ - CURVE_MIN_HZ)) *
-                      CURVE_VIEWBOX_WIDTH;
-                    const width =
-                      ((high - low) / (CURVE_MAX_HZ - CURVE_MIN_HZ)) *
-                      CURVE_VIEWBOX_WIDTH;
-                    return (
-                      <rect
-                        key={`b-${problem.id}-${index}`}
-                        className="compare-curve-region b"
-                        x={x}
-                        y={0}
-                        width={Math.max(1, width)}
-                        height={CURVE_VIEWBOX_HEIGHT}
-                      />
-                    );
-                  })}
-                  <path className="compare-curve-line a" d={curvePathA} />
-                  <path className="compare-curve-line b" d={curvePathB} />
-                </svg>
-              </div>
-              <div className="compare-section">
-                <div className="compare-section-title">Tightness / Decay</div>
-                <div className="compare-band">
-                  <div className="compare-band-row">
-                    <span className="compare-band-label">A</span>
-                    <div className="compare-band-bar">
-                      {SCORE_BANDS.map((band, index) => (
-                        <span
-                          key={`a-${band}`}
-                          className={`compare-band-segment${index === getBandIndex(compareMetrics.a.tightnessBand)
-                            ? " is-active"
-                            : ""
-                            }`}
-                        >
-                          {band}
-                        </span>
-                      ))}
-                    </div>
-                  </div>
-                  <div className="compare-band-row">
-                    <span className="compare-band-label">B</span>
-                    <div className="compare-band-bar">
-                      {SCORE_BANDS.map((band, index) => (
-                        <span
-                          key={`b-${band}`}
-                          className={`compare-band-segment${index === getBandIndex(compareMetrics.b.tightnessBand)
-                            ? " is-active"
-                            : ""
-                            }`}
-                        >
-                          {band}
-                        </span>
-                      ))}
-                    </div>
-                  </div>
-                </div>
-              </div>
-              <div className="compare-section">
-                <div className="compare-section-title">Change log</div>
-                {compareData.changeLog.length > 0 ? (
-                  <ul className="compare-log">
-                    {compareData.changeLog.map((line, index) => (
-                      <li key={`${line}-${index}`}>{line}</li>
-                    ))}
-                  </ul>
-                ) : (
-                  <div className="compare-empty">No changes logged.</div>
-                )}
-              </div>
-            </section>
-          )}
-          <section className="panel-card">
-            <h3 className="panel-title">Top Problems</h3>
-            {analysis.noMajorIssues ? (
-              <div className="problem-empty">No major issues detected</div>
-            ) : (
-              <ul className="problem-list">
-                {analysis.topProblems.map((problem) => (
-                  <li key={problem.id}>
-                    <button
-                      type="button"
-                      className={`problem-button${problem.id === selectedProblemId ? " is-selected" : ""
-                        }`}
-                      onClick={() => setSelectedProblemId(problem.id)}
-                    >
-                      <div className="problem-label">
-                        {formatProblemLabel(problem)}
-                      </div>
-                      <div className="problem-badges">
-                        <span
-                          className={`problem-badge fixability-${problem.fixabilityPrimary === "add_treatment" ? "treatment" : problem.fixabilityPrimary === "seat_move" ? "seat" : "sub"}`}
-                        >
-                          {formatFixabilityBadge(problem.fixabilityPrimary)}
-                        </span>
-                        {problem.tags.includes("integration_sensitive") && (
-                          <span className="problem-tag">
-                            Integration-sensitive
-                          </span>
-                        )}
-                      </div>
-                    </button>
-                  </li>
-                ))}
-              </ul>
-            )}
-            {analysis.deepBassWatchlist && (
-              <div className="watchlist">
-                <div className="watchlist-title">Deep Bass Watchlist</div>
-                <div className="watchlist-detail">
-                  {formatProblemLabel({
-                    id: "deep-bass",
-                    kind: analysis.deepBassWatchlist.kind,
-                    centerHz: analysis.deepBassWatchlist.centerHz,
-                    rangeHz: analysis.deepBassWatchlist.rangeHz,
-                    severity: analysis.deepBassWatchlist.severity,
-                    deviation: analysis.deepBassWatchlist.deviation,
-                    fixabilityPrimary: "sub_move",
-                    tags: [],
-                  })}
-                </div>
-              </div>
-            )}
-          </section>
-          {selectedProblem && (
-            <section className="panel-card">
-              <h3 className="panel-title">Fix This</h3>
-              <div className="panel-row">
-                <span>Selected</span>
-                <span>{formatProblemLabel(selectedProblem)}</span>
-              </div>
-              {recommendationSet?.banner && (
-                <div className="recommendation-banner">
-                  <div className="recommendation-banner-title">
-                    {recommendationSet.banner.title}
-                  </div>
-                  <div className="recommendation-banner-body">
-                    {recommendationSet.banner.body}
-                  </div>
-                </div>
-              )}
-              {selectedProblem.kind === "null" && (
-                <div className="recommendation-note">
-                  Nulls are cancellations. Small seat moves or sub placement
-                  changes can help. Treatments usually won’t fully ‘fill’ a
-                  severe null.
-                </div>
-              )}
-              {selectedProblem.kind === "null" &&
-                selectedProblem.tags.includes("seat_sensitive") && (
-                  <div className="recommendation-note">
-                    <strong>Modal Null:</strong> This is a room mode at your listening position.
-                    Moving the subwoofer won't help—the waves cancel at the seat itself.
-                    Moving the seat left/right or forward/back will resolve it.
-                  </div>
-                )}
-              {selectedProblem.kind === "null" &&
-                selectedProblem.severity === "severe" &&
-                selectedProblem.fixabilityPrimary === "seat_move" &&
-                !selectedProblem.tags.includes("seat_sensitive") && (
-                  <div className="recommendation-note">
-                    <strong>Modal Null:</strong> This appears to be a room mode at your listening position.
-                    Moving the subwoofer likely won't help—try moving the seat left/right or forward/back.
-                  </div>
-                )}
-              {selectedProblem.tags.includes("integration_sensitive") && (
-                <div className="recommendation-note">
-                  Upper bass (80–120 Hz) is sensitive to crossover/phase and
-                  speaker interaction. Treat results as directional guidance.
-                </div>
-              )}
-              {state.constraints.seatLocked &&
-                selectedProblem.tags.includes("seat_sensitive") && (
-                  <div className="recommendation-note">
-                    Seat movement would help, but it’s locked.
-                  </div>
-                )}
-              <ol className="recommendation-list">
-                {recommendationSet?.recommendations.map((rec, index) => (
-                  <li key={rec.id} className="recommendation-item">
-                    <div className="recommendation-header">
-                      <span className="recommendation-title">
-                        {recommendationHeaders[index] ?? "Next step"}
-                      </span>
-                      {rec.impact === "low" && (
-                        <span className="pill low-impact">Impact: Low</span>
-                      )}
-                    </div>
-                    <div className="recommendation-body">{rec.title}</div>
-                    {rec.detail && (
-                      <div className="recommendation-detail">{rec.detail}</div>
-                    )}
-                    {rec.impact === "low" && (
-                      <div className="recommendation-why">
-                        {rec.why ?? "Below the meaningful-improvement threshold; worth testing."}
-                      </div>
-                    )}
-                  </li>
-                ))}
-              </ol>
-            </section>
-          )}
-          <section className="panel-card">
-            <h3 className="panel-title">Treatments</h3>
-            <div className="dr-preview">
-              <h4 className="panel-subtitle">Expected benefit</h4>
-              <div className="dr-why">Why: Placement aligns with target zone.</div>
-              <div className="dr-meters">
-                <div className="dr-meter">
-                  <span>Zone saturation</span>
-                  <div className="dr-pill">Low</div>
-                </div>
-                <div className="dr-meter">
-                  <span>Frequency overlap</span>
-                  <div className="dr-pill">None</div>
-                </div>
-              </div>
-              <div className="dr-zone-icons">
-                <div className="dr-zone">
-                  <span className="dr-zone-dot best" />
-                  Best
-                </div>
-                <div className="dr-zone">
-                  <span className="dr-zone-dot ok" />
-                  OK
-                </div>
-                <div className="dr-zone">
-                  <span className="dr-zone-dot limited" />
-                  Limited
-                </div>
-              </div>
-              <div className="dr-tooltip">
-                You’re doubling up in the same zone at a similar frequency.
-                Expect strong diminishing returns.
-              </div>
-            </div>
-            <div className="treatment-list">
-              {state.treatments.length === 0 && (
-                <div className="treatment-empty">No treatments yet.</div>
-              )}
-              {state.treatments.map((treatment) => {
-                const invalid = isTreatmentInvalid(treatment, snapZones);
-                const zone = getTreatmentZone(treatment, snapZones);
-                const isEditing = editingTreatmentId === treatment.id || invalid;
-                const treatmentZones = getEligibleZones(treatment.type, snapZones);
-                return (
-                  <div key={treatment.id} className="treatment-item">
-                    <div className="treatment-header">
-                      <span>{getTreatmentLabel(treatment.type)}</span>
-                      {invalid && (
-                        <span className="pill warning">Needs attention</span>
-                      )}
-                    </div>
-                    <div className="treatment-row">
-                      <span>Strength</span>
-                      <span>{treatment.strength}</span>
-                    </div>
-                    {treatment.type === "tuned_trap" && (
-                      <div className="treatment-row">
-                        <span>Target</span>
-                        <span>{treatment.targetHz} Hz</span>
-                      </div>
-                    )}
-                    <div className="treatment-row">
-                      <span>Zone</span>
-                      {isEditing ? (
-                        <select
-                          value={treatmentZones.some((z) => z.id === treatment.snapZoneId)
-                            ? treatment.snapZoneId
-                            : treatmentZones[0]?.id ?? ""}
-                          onChange={(event) => {
-                            updateTreatment(treatment.id, (prev) => ({
-                              ...prev,
-                              snapZoneId: event.target.value,
-                            }));
-                            setEditingTreatmentId(null);
-                          }}
-                          disabled={treatmentZones.length === 0}
-                        >
-                          {treatmentZones.length === 0 && (
-                            <option value="">No valid zones</option>
-                          )}
-                          {treatmentZones.map((zoneOption) => (
-                            <option key={zoneOption.id} value={zoneOption.id}>
-                              {zoneOption.id}
-                            </option>
-                          ))}
-                        </select>
-                      ) : (
-                        <span>{zone ? zone.id : "Unknown zone"}</span>
-                      )}
-                    </div>
-                    <div className="treatment-actions">
-                      <button
-                        type="button"
-                        className="treatment-button"
-                        onClick={() =>
-                          setEditingTreatmentId((prev) =>
-                            prev === treatment.id ? null : treatment.id,
-                          )
-                        }
-                      >
-                        {invalid ? "Fix placement" : "Change zone"}
-                      </button>
-                      <button
-                        type="button"
-                        className="treatment-button secondary"
-                        onClick={() => removeTreatment(treatment.id)}
-                      >
-                        Remove
-                      </button>
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-            <div className="treatment-add">
-              <h4 className="panel-subtitle">Add Treatment</h4>
-              <div className="treatment-row">
-                <label>
-                  Type
-                  <select
-                    value={newTreatmentType}
-                    onChange={(event) =>
-                      setNewTreatmentType(event.target.value as TreatmentType)
-                    }
-                  >
-                    {TREATMENT_TYPES.map((type) => (
-                      <option key={type} value={type}>
-                        {getTreatmentLabel(type)} ({treatmentCounts[type]}/
-                        {TREATMENT_CAPS[type]})
-                      </option>
-                    ))}
-                  </select>
-                </label>
-              </div>
-              <div className="treatment-row">
-                <label>
-                  Strength
-                  <select
-                    value={newTreatmentStrength}
-                    onChange={(event) =>
-                      setNewTreatmentStrength(
-                        event.target.value as TreatmentStrength,
-                      )
-                    }
-                  >
-                    {TREATMENT_STRENGTHS.map((strength) => (
-                      <option key={strength} value={strength}>
-                        {strength}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-              </div>
-              {newTreatmentType === "tuned_trap" && (
-                <div className="treatment-row">
-                  <label>
-                    Target Hz
-                    <input
-                      type="number"
-                      min={20}
-                      max={120}
-                      step={1}
-                      value={newTreatmentTargetHz}
-                      onChange={(event) =>
-                        setNewTreatmentTargetHz(Number(event.target.value))
-                      }
-                    />
-                  </label>
-                </div>
-              )}
-              <div className="treatment-row">
-                <label>
-                  Zone
-                  <select
-                    value={newTreatmentZoneId}
-                    onChange={(event) => setNewTreatmentZoneId(event.target.value)}
-                    disabled={eligibleZones.length === 0}
-                  >
-                    {eligibleZones.length === 0 && (
-                      <option value="">No valid zones</option>
-                    )}
-                    {eligibleZones.map((zone) => (
-                      <option key={zone.id} value={zone.id}>
-                        {zone.id}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-              </div>
-              {isTreatmentCapReached(newTreatmentType, state.treatments) && (
-                <div className="treatment-warning">
-                  Cap reached for {getTreatmentLabel(newTreatmentType)} (
-                  {TREATMENT_CAPS[newTreatmentType]} max).
-                </div>
-              )}
-              <button
-                type="button"
-                className="treatment-button primary"
-                disabled={
-                  !newTreatmentZoneId ||
-                  isTreatmentCapReached(newTreatmentType, state.treatments)
-                }
-                onClick={addTreatment}
-              >
-                Add Treatment
-              </button>
-            </div>
-          </section>
-          <section className="panel-card">
-            <h3 className="panel-title">Seat</h3>
-            <div className="panel-row">
-              <span>Position</span>
-              <span>
-                x {state.seat.x.toFixed(2)} m, y {state.seat.y.toFixed(2)} m
-              </span>
-            </div>
-          </section>
-          <section className="panel-card">
-            <h3 className="panel-title">Mains</h3>
-            <label className="panel-row panel-toggle">
-              <span>Enabled</span>
-              <input
-                type="checkbox"
-                checked={state.mains.enabled}
-                onChange={(event) => toggleMainsEnabled(event.target.checked)}
-              />
-            </label>
-            <div className="panel-row">
-              <span>Left</span>
-              <span>
-                x {state.mains.left.x.toFixed(2)} m, y{" "}
-                {state.mains.left.y.toFixed(2)} m
-              </span>
-            </div>
-            <div className="panel-row">
-              <span>Right</span>
-              <span>
-                x {state.mains.right.x.toFixed(2)} m, y{" "}
-                {state.mains.right.y.toFixed(2)} m
-              </span>
-            </div>
-            <div className="panel-row">
-              <span>Lowest strong bass</span>
-              <span>{state.mains.mainsLowestStrongBassHz} Hz</span>
-            </div>
-          </section>
-          <section className="panel-card">
-            <h3 className="panel-title">Subwoofer</h3>
-            <div className="panel-row">
-              <span>Mode</span>
-              <span>{state.subwoofer.mode}</span>
-            </div>
-            <div className="panel-row">
-              <span>Preset</span>
-              <span>{state.subwoofer.preset}</span>
-            </div>
-            <div className="panel-row">
-              <span>Position</span>
-              <span>
-                x {state.subwoofer.x.toFixed(2)} m, y{" "}
-                {state.subwoofer.y.toFixed(2)} m
-              </span>
-            </div>
-            {subWarnings.length > 0 && (
-              <div className="warning-list">
-                {subWarnings.map((warning) => (
-                  <div key={warning.id} className="warning-item">
-                    {warning.message}
-                  </div>
-                ))}
-              </div>
-            )}
-          </section>
-        </aside>
       </div>
+
+      <ControlDeck>
+        <SetupPanel
+          room={state.room}
+          units={state.units}
+          constraints={state.constraints}
+          onUpdateRoom={updateRoom}
+          onUpdateUnits={updateUnits}
+          onUpdateConstraints={updateConstraints}
+          onAddOpening={addOpening}
+          onUpdateOpening={updateOpening}
+          onRemoveOpening={removeOpening}
+        />
+        <TreatmentsPanel
+          treatments={state.treatments}
+          snapZones={snapZones}
+          subwoofer={state.subwoofer}
+          mains={state.mains}
+          subWarnings={subWarnings}
+          invalidTreatmentIds={invalidTreatmentIds}
+          onAddTreatment={addTreatment}
+          onUpdateTreatment={updateTreatment}
+          onRemoveTreatment={removeTreatment}
+          onUpdateSubwoofer={updateSubwoofer}
+          onUpdateMains={updateMains}
+        />
+        <AnalysisPanel
+          analysis={analysis}
+          selectedProblemId={selectedProblemId}
+          onSelectProblem={setSelectedProblemId}
+        />
+        <SnapshotsPanel
+          snapshots={snapshots}
+          onSaveSnapshot={saveSnapshot}
+          onLoadSnapshot={loadSnapshot}
+          onToggleLockA={toggleLockA}
+        />
+      </ControlDeck>
     </div>
   );
 }

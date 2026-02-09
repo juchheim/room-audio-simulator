@@ -40,18 +40,20 @@ function formatPosition(
   )}`;
 }
 
-function formatOpening(opening: Opening | null | undefined, units: Units): string {
-  if (!opening) {
-    return "Opening: None";
+function formatOpenings(openings: Opening[], units: Units): string[] {
+  if (openings.length === 0) {
+    return ["Opening: None"];
   }
-  const doorState =
-    opening.type === "doorway" && opening.doorState
-      ? `, door ${opening.doorState}`
-      : "";
-  return `Opening: ${opening.type} (${opening.wall} wall, width ${formatLength(
-    opening.width,
-    units,
-  )}, center ${opening.positionAlongWallNorm.toFixed(2)}${doorState})`;
+  return openings.map((opening, index) => {
+    const doorState =
+      opening.type === "doorway" && opening.doorState
+        ? `, door ${opening.doorState}`
+        : "";
+    return `Opening ${index + 1}: ${opening.type} (${opening.wall} wall, width ${formatLength(
+      opening.width,
+      units,
+    )}, center ${opening.positionAlongWallNorm.toFixed(2)}${doorState})`;
+  });
 }
 
 function formatSeverity(severity: TopProblem["severity"]): string {
@@ -155,7 +157,7 @@ export function buildPlanMarkdown(
       state.units,
     )} x ${formatLength(state.room.height, state.units)}`,
   );
-  lines.push(formatOpening(state.room.opening, state.units));
+  lines.push(...formatOpenings(state.room.openings, state.units));
   lines.push("");
 
   lines.push("## Seat + mains + sub");

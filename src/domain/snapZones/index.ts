@@ -191,7 +191,7 @@ function zoneDisabledByOpening(
   return zone;
 }
 
-export function generateSnapZones(room: Room, opening: Opening | null): SnapZone[] {
+export function generateSnapZones(room: Room, openings: Opening[]): SnapZone[] {
   const [w1, w2] = getWallThirds(room.width);
   const midLength = room.length / 2;
 
@@ -294,6 +294,11 @@ export function generateSnapZones(room: Room, opening: Opening | null): SnapZone
     },
   ];
 
-  const span = opening ? getOpeningSpan(opening, room) : null;
-  return zones.map((zone) => zoneDisabledByOpening(zone, room, opening, span));
+  // Apply opening disabling for each opening - a zone is disabled if ANY opening overlaps it
+  let result = zones;
+  for (const opening of openings) {
+    const span = getOpeningSpan(opening, room);
+    result = result.map((zone) => zoneDisabledByOpening(zone, room, opening, span));
+  }
+  return result;
 }

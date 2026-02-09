@@ -33,14 +33,22 @@ function clampOpeningCenter(opening: Opening, room: Room): Opening {
 }
 
 function normalizeProjectState(state: ProjectState): ProjectState {
-  const opening = state.room.opening;
+  const openings = state.room.openings;
 
-  if (!opening) {
+  if (openings.length === 0) {
     return state;
   }
 
-  const normalizedOpening = clampOpeningCenter(opening, state.room);
-  if (normalizedOpening === opening) {
+  let changed = false;
+  const normalizedOpenings = openings.map((opening) => {
+    const normalized = clampOpeningCenter(opening, state.room);
+    if (normalized !== opening) {
+      changed = true;
+    }
+    return normalized;
+  });
+
+  if (!changed) {
     return state;
   }
 
@@ -48,7 +56,7 @@ function normalizeProjectState(state: ProjectState): ProjectState {
     ...state,
     room: {
       ...state.room,
-      opening: normalizedOpening,
+      openings: normalizedOpenings,
     },
   };
 }
